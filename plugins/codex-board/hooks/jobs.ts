@@ -208,22 +208,40 @@ function tokensOf(command: string): string[] {
   return tokens
 }
 
-const flagOf = (tokens: string[], names: string[]): string | undefined => {
-  for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index] ?? ''
-    if (names.includes(token)) return tokens[index + 1]
-    const name = names.find(one => token.startsWith(`${one}=`))
-    if (name !== undefined) return token.slice(name.length + 1)
+// codex-companion의 parseArgs처럼 값을 받는 옵션만 골라 읽는다
+const VALUE_OPTIONS: Record<string, keyof Run | null> = {
+  '--model': 'model',
+  '-m': 'model',
+  '--effort': 'effort',
+  '--base': null,
+  '--scope': null,
+  '--cwd': null,
+  '-C': null,
+  '--prompt-file': null,
+}
+
+function optionsOf(argv: string[]): Run {
+  const found: Run = {}
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index] ?? ''
+    if (token === '--') break
+    const [name = '', inline] = token.startsWith('--') ? [token.split('=', 1)[0], token.includes('=') ? token.slice(token.indexOf('=') + 1) : undefined] : [token, undefined]
+    if (!(name in VALUE_OPTIONS)) continue
+    const value = inline ?? argv[index + 1]
+    if (inline === undefined) index += 1
+    const key = VALUE_OPTIONS[name]
+    if (key && value !== undefined) found[key] = value
   }
-  return undefined
+  return found
 }
 
 export function parseRunFlags(command: string): Run {
   const tokens = tokensOf(command)
   const start = tokens.findIndex(token => /codex-companion\.mjs$/.test(token))
-  const args = start < 0 ? [] : tokens.slice(start + 1)
-  const model = flagOf(args, ['--model', '-m'])
-  const effort = flagOf(args, ['--effort'])
+  // 서브커맨드 뒤 인자가 하나면 codex-companion이 그것을 다시 나눈다 ("$ARGUMENTS")
+  const rest = start < 0 ? [] : tokens.slice(start + 2)
+  const argv = rest.length === 1 ? tokensOf(rest[0] ?? '') : rest
+  const { model, effort } = optionsOf(argv)
   return {
     ...(model === undefined ? {} : { model: MODEL_ALIAS[model.toLowerCase()] ?? model }),
     ...(effort === undefined ? {} : { effort: effort.toLowerCase() }),
@@ -252,7 +270,8 @@ export function resolveRun(job: Job, run: Run | undefined, request: Run | undefi
   const model = known.model ?? fallbackModel
   const effort = known.effort ?? defaults.effort
   if (model === undefined && effort === undefined) return undefined
-  return { model, effort, isDefault: known.model === undefined || known.effort === undefined }
+  const isDefault = (known.model === undefined && fallbackModel !== undefined) || (known.effort === undefined && defaults.effort !== undefined)
+  return { model, effort, isDefault }
 }
 
 export function countBySeverity(findings: Finding[]): [Severity, number][] {

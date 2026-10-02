@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
-import { parseDetail, parseRunFlags } from './jobs'
+import { parseDetail, parseRunFlags, resolveRun } from './jobs'
 
 const NOW = Date.parse('2026-10-02T10:00:00Z')
 const CONFIG = '/home/me/.claude'
@@ -432,12 +432,29 @@ describe('codex-board', () => {
 })
 
 describe('parseRunFlags', () => {
-  test('따옴표 안 프롬프트의 "--model spark"는 옵션으로 읽지 않는다', () => {
-    expect(parseRunFlags('node "/p/codex-companion.mjs" task "fix the --model spark option"')).toEqual({})
+  test('인자가 여러 개일 때 따옴표 안 프롬프트의 "--model spark"는 옵션으로 읽지 않는다', () => {
+    expect(parseRunFlags('node "/p/codex-companion.mjs" task --effort low "fix the --model spark option"')).toEqual({ effort: 'low' })
   })
 
   test('--model=spark, --effort high는 gpt-5.3-codex-spark와 high를 반환한다', () => {
     expect(parseRunFlags("node /p/codex-companion.mjs task --model=spark --effort high 'x'")).toEqual({ model: 'gpt-5.3-codex-spark', effort: 'high' })
+  })
+})
+
+describe('parseRunFlags 인자 묶음', () => {
+  test('review "--model gpt-5.5 --base main"처럼 한 인자로 묶인 옵션도 gpt-5.5를 반환한다', () => {
+    expect(parseRunFlags('node "/p/codex-companion.mjs" review "--model gpt-5.5 --base main"')).toEqual({ model: 'gpt-5.5' })
+  })
+
+  test('-- 뒤의 --model은 프롬프트로 보고 읽지 않는다', () => {
+    expect(parseRunFlags('node /p/codex-companion.mjs task --effort low -- --model spark')).toEqual({ effort: 'low' })
+  })
+})
+
+describe('resolveRun', () => {
+  test('--model만 명시하고 config.toml에 effort가 없으면 "(기본 설정)"으로 보지 않는다', () => {
+    const job = { kind: 'review' } as Parameters<typeof resolveRun>[0]
+    expect(resolveRun(job, { model: 'gpt-6-sol' }, undefined, { model: 'gpt-6.1-sol' })).toEqual({ model: 'gpt-6-sol', effort: undefined, isDefault: false })
   })
 })
 
