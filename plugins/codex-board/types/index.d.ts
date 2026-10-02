@@ -52,6 +52,8 @@ export type CodexDefaults = Run & { reviewModel?: string }
 export type Pending = {
   id: string
   label: string
+  // codex-companion 작업 종류: review, adversarial-review, task
+  kind: string
   at: number
   run?: Run
 }

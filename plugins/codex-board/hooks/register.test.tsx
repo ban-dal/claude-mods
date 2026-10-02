@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
-import { parseDetail } from './jobs'
+import { parseDetail, parseRunFlags } from './jobs'
 
 const NOW = Date.parse('2026-10-02T10:00:00Z')
 const CONFIG = '/home/me/.claude'
@@ -191,7 +191,7 @@ describe('codex-board', () => {
     const files: Files = { [`${APP}/state.json`]: state(), '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "medium"\n' }
     setup(on, files)
     on('tool.call', { tool: 'Bash' }, () => {
-      files[`${APP}/state.json`] = state(job({ createdAt: iso(100), startedAt: iso(100) }))
+      files[`${APP}/state.json`] = state(job({ id: 'task-1', kind: 'task', title: 'Codex Task', createdAt: iso(100), startedAt: iso(100) }))
       return { result: { stdout: '', stderr: '', interrupted: false } } as never
     })
     await start($)
@@ -200,6 +200,31 @@ describe('codex-board', () => {
     await $.tool.call({ tool: 'Bash', tool_use_id: 't3', command: 'node codex-companion.mjs task --model spark --effort high "fix"' } as never)
 
     expect(await ui.find({ type: 'Text', text: /gpt-5\.3-codex-spark · high$/ })).toBeTruthy()
+  })
+
+  test('동시에 실행한 리뷰와 작업 요청은 각자 같은 종류의 작업에 model을 붙인다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state() }
+    setup(on, files)
+    const releases: (() => void)[] = []
+    on('tool.call', { tool: 'Bash' }, async () => {
+      await new Promise<void>(resolve => releases.push(resolve))
+      return { result: { stdout: '', stderr: '', interrupted: false } } as never
+    })
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
+
+    const review = $.tool.call({ tool: 'Bash', tool_use_id: 'r', command: 'node /p/codex-companion.mjs review --model gpt-6-sol' } as never)
+    const task = $.tool.call({ tool: 'Bash', tool_use_id: 't', command: 'node /p/codex-companion.mjs task --model spark "x"' } as never)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    files[`${APP}/state.json`] = state(
+      job({ id: 'task-1', kind: 'task', title: 'Codex Task', summary: 'x', createdAt: iso(100), startedAt: iso(100) }),
+      job({ id: 'review-1', createdAt: iso(200), startedAt: iso(200) }),
+    )
+    releases.forEach(release => release())
+    await Promise.all([review, task])
+
+    expect(await ui.find({ type: 'Text', text: /gpt-6-sol/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /gpt-5\.3-codex-spark/ })).toBeTruthy()
   })
 
   test('요청 값을 모르는 작업은 config.toml의 model과 effort를 "(기본 설정)"과 함께 표시한다', async ($, on) => {
@@ -369,6 +394,16 @@ describe('codex-board', () => {
     const second = await $.command.run({ command: 'codex-board', args: '' } as never)
     expect(opened).toEqual([])
     expect(JSON.stringify(second)).toContain('닫았습니다')
+  })
+})
+
+describe('parseRunFlags', () => {
+  test('따옴표 안 프롬프트의 "--model spark"는 옵션으로 읽지 않는다', () => {
+    expect(parseRunFlags('node "/p/codex-companion.mjs" task "fix the --model spark option"')).toEqual({})
+  })
+
+  test('--model=spark, --effort high는 gpt-5.3-codex-spark와 high를 반환한다', () => {
+    expect(parseRunFlags("node /p/codex-companion.mjs task --model=spark --effort high 'x'")).toEqual({ model: 'gpt-5.3-codex-spark', effort: 'high' })
   })
 })
 

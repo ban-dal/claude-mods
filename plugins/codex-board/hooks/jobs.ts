@@ -178,12 +178,52 @@ export function parseDetail(source: string | undefined, log: string | undefined,
 // codex-companion이 받아들이는 모델 별칭
 const MODEL_ALIAS: Record<string, string> = { spark: 'gpt-5.3-codex-spark' }
 
-const flagOf = (command: string, names: string): string | undefined =>
-  command.match(new RegExp(`(?:^|\\s)(?:${names})(?:=|\\s+)(["']?)([^\\s"']+)\\1`))?.[2]
+// 따옴표로 묶인 프롬프트가 한 토큰이 되도록 셸 규칙대로 나눈다
+function tokensOf(command: string): string[] {
+  const tokens: string[] = []
+  let current = ''
+  let quote: string | null = null
+  let hasToken = false
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index] ?? ''
+    if (quote !== null) {
+      if (char === quote) quote = null
+      else if (char === '\\' && quote === '"' && index + 1 < command.length) current += command[++index] ?? ''
+      else current += char
+    } else if (char === '"' || char === "'") {
+      quote = char
+      hasToken = true
+    } else if (char === '\\' && index + 1 < command.length) {
+      current += command[++index] ?? ''
+      hasToken = true
+    } else if (/\s/.test(char)) {
+      if (hasToken || current !== '') tokens.push(current)
+      current = ''
+      hasToken = false
+    } else {
+      current += char
+    }
+  }
+  if (hasToken || current !== '') tokens.push(current)
+  return tokens
+}
+
+const flagOf = (tokens: string[], names: string[]): string | undefined => {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? ''
+    if (names.includes(token)) return tokens[index + 1]
+    const name = names.find(one => token.startsWith(`${one}=`))
+    if (name !== undefined) return token.slice(name.length + 1)
+  }
+  return undefined
+}
 
 export function parseRunFlags(command: string): Run {
-  const model = flagOf(command, '--model|-m')
-  const effort = flagOf(command, '--effort')
+  const tokens = tokensOf(command)
+  const start = tokens.findIndex(token => /codex-companion\.mjs$/.test(token))
+  const args = start < 0 ? [] : tokens.slice(start + 1)
+  const model = flagOf(args, ['--model', '-m'])
+  const effort = flagOf(args, ['--effort'])
   return {
     ...(model === undefined ? {} : { model: MODEL_ALIAS[model.toLowerCase()] ?? model }),
     ...(effort === undefined ? {} : { effort: effort.toLowerCase() }),

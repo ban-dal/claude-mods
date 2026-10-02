@@ -74,22 +74,36 @@ async function refreshDefaults($: EngineInterface) {
   if (JSON.stringify(await read($, defaults)) !== JSON.stringify(next)) await update($, defaults, () => next)
 }
 
-// 요청 명령에서 읽은 model·effort를 그 뒤에 생긴 작업에 붙인다
-async function claimRuns($: EngineInterface, list: Job[], waiting: Pending[]) {
+// 요청마다 그 뒤에 생긴 같은 종류의 작업을 요청 순서대로 하나씩 짝짓고,
+// 요청 명령에서 읽은 model·effort를 붙인다. 짝지은 요청의 id를 돌려준다
+async function claimRuns($: EngineInterface, list: Job[], waiting: Pending[]): Promise<Set<string>> {
   const known = await read($, runs)
   const claimed: Record<string, Run> = {}
-  for (const one of waiting) {
-    if (one.run === undefined) continue
+  const matched = new Set<string>()
+  for (const one of [...waiting].sort((a, b) => a.at - b.at)) {
     const match = list
-      .filter(job => isMine(job) && known[job.id] === undefined && claimed[job.id] === undefined && Date.parse(job.createdAt) >= one.at - 5_000)
+      .filter(
+        job =>
+          isMine(job) &&
+          job.kind === one.kind &&
+          known[job.id] === undefined &&
+          claimed[job.id] === undefined &&
+          Date.parse(job.createdAt) >= one.at - 5_000,
+      )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
-    if (match !== undefined) claimed[match.id] = one.run
+    if (match === undefined) continue
+    claimed[match.id] = one.run ?? {}
+    matched.add(one.id)
   }
-  if (Object.keys(claimed).length === 0) return
+  if (matched.size === 0) return matched
   const ids = new Set(list.map(job => job.id))
-  const kept = Object.fromEntries(Object.entries(known).filter(([id]) => ids.has(id)))
-  const saved = await update($, runs, () => ({ ...kept, ...claimed }))
+  // 동시에 끝난 다른 요청의 짝짓기를 덮어쓰지 않도록 최신 값에 합친다
+  const saved = await update($, runs, current => ({
+    ...Object.fromEntries(Object.entries(current).filter(([id]) => ids.has(id))),
+    ...claimed,
+  }))
   await $.store.set('runs', saved).catch(() => undefined)
+  return matched
 }
 
 // 첫 Codex 요청 때 생기는 디렉터리도 잡도록 갱신할 때마다 다시 찾는다
@@ -197,10 +211,8 @@ async function refresh($: EngineInterface) {
     // 상태 파일에 작업이 생겼거나 오래된 요청은 지운다
     const now = await $.clock.now()
     const waiting = await read($, pending)
-    await claimRuns($, after, waiting)
-    const kept = waiting.filter(
-      one => now - one.at < PENDING_TTL && !after.some(job => isMine(job) && Date.parse(job.createdAt) >= one.at - 5_000),
-    )
+    const matched = await claimRuns($, after, waiting)
+    const kept = waiting.filter(one => now - one.at < PENDING_TTL && !matched.has(one.id))
     if (kept.length !== waiting.length) await update($, pending, () => kept)
   } finally {
     isRefreshing = false
@@ -275,13 +287,13 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const kind = e.command.match(CODEX_RUN)?.[1]
     if (kind === undefined || e.tool_use_id === undefined) return next(e)
-    const request = { id: e.tool_use_id, label: `Codex ${RUN_LABEL[kind] ?? kind}`, run: parseRunFlags(e.command) }
+    const request = { id: e.tool_use_id, label: `Codex ${RUN_LABEL[kind] ?? kind}`, kind, run: parseRunFlags(e.command) }
     return track($, request, () => next(e))
   })
 
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     if (e.subagent_type !== 'codex:codex-rescue' || e.tool_use_id === undefined) return next(e)
-    return track($, { id: e.tool_use_id, label: 'Codex rescue 위임' }, () => next(e))
+    return track($, { id: e.tool_use_id, label: 'Codex rescue 위임', kind: 'task' }, () => next(e))
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
