@@ -84,7 +84,8 @@ async function claimRuns($: EngineInterface, list: Job[], waiting: Pending[]): P
     const match = list
       .filter(
         job =>
-          isMine(job) &&
+          // 다른 세션이 같은 레포에서 시작한 작업에는 붙이지 않는다
+          (job.sessionId === undefined ? isMine(job) : job.sessionId === context.sessionId) &&
           job.kind === one.kind &&
           known[job.id] === undefined &&
           claimed[job.id] === undefined &&
@@ -240,8 +241,11 @@ async function track<T>($: EngineInterface, request: Omit<Pending, 'at'>, run: (
   try {
     return await run()
   } finally {
-    await claimRuns($, await loadJobs($), await read($, pending))
-    await update($, pending, list => list.filter(one => one.id !== request.id))
+    // 백그라운드 실행은 작업이 생기기 전에 끝날 수 있어, 짝짓지 못한 요청은 표시만 끄고 남긴다
+    const matched = await claimRuns($, await loadJobs($), await read($, pending))
+    await update($, pending, list =>
+      matched.has(request.id) ? list.filter(one => one.id !== request.id) : list.map(one => (one.id === request.id ? { ...one, isDone: true } : one)),
+    )
     await refresh($)
   }
 }
@@ -312,7 +316,7 @@ export const register: Register = on => {
     const all = await read($, jobs)
     const loaded = await read($, details)
     const opened = await read($, expanded)
-    const waiting = await read($, pending)
+    const waiting = (await read($, pending)).filter(one => one.isDone !== true)
     const requested = await read($, runs)
     const configured = await read($, defaults)
     const now = await $.clock.now()

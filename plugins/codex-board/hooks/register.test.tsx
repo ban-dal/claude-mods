@@ -261,6 +261,37 @@ describe('codex-board', () => {
     expect(await ui.find({ type: 'Text', text: /gpt-5\.3-codex-spark/ })).toBeTruthy()
   })
 
+  test('백그라운드 실행이 작업 생성 전에 끝나도 나중에 생긴 작업에 명령의 model을 붙인다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state(), '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\n' }
+    const { clock } = setup(on, files)
+    on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }) as never)
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
+
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'bg', command: 'node /p/codex-companion.mjs review --model gpt-6-sol' } as never)
+    expect(await ui.find({ type: 'Text', text: /요청 중/ })).toBeFalsy()
+    files[`${APP}/state.json`] = state(job({ createdAt: iso(1_000), startedAt: iso(1_000) }))
+    await clock.advance(2_000)
+
+    expect(await ui.find({ type: 'Text', text: /gpt-6-sol$/ })).toBeTruthy()
+  })
+
+  test('같은 레포에서 다른 세션이 시작한 작업에는 이 세션 명령의 model을 붙이지 않는다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state(), '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\n' }
+    setup(on, files)
+    on('tool.call', { tool: 'Bash' }, () => {
+      files[`${APP}/state.json`] = state(job({ sessionId: 'S2', createdAt: iso(100) }))
+      return { result: { stdout: '', stderr: '', interrupted: false } } as never
+    })
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
+
+    await $.tool.call({ tool: 'Bash', tool_use_id: 'x', command: 'node /p/codex-companion.mjs review --model gpt-6-sol' } as never)
+
+    expect(await ui.find({ type: 'Text', text: /gpt-6-sol/ })).toBeFalsy()
+    expect(await ui.find({ type: 'Text', text: /gpt-6\.1-sol \(기본 설정\)$/ })).toBeTruthy()
+  })
+
   test('요청 값을 모르는 작업은 config.toml의 model과 effort를 "(기본 설정)"과 함께 표시한다', async ($, on) => {
     setup(on, {
       [`${APP}/state.json`]: state(job({})),

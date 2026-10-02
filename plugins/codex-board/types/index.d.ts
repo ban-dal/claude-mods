@@ -58,6 +58,8 @@ export type Pending = {
   run?: Run
   // 값이 다른 같은 종류의 요청과 겹쳐 어느 작업의 것인지 알 수 없음
   isAmbiguous?: boolean
+  // 호출은 끝났지만 작업과 짝짓기 전이라 model·effort를 붙이려고 남겨 둠
+  isDone?: boolean
 }
 
 export type Scope = 'mine' | 'all'
