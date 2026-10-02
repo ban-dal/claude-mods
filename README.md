@@ -16,6 +16,8 @@ claude plugin install codex-board@claude-mods
 
 프롬프트 위에 컨텍스트 사용량, 세션(5시간) 한도, 주간(7일) 한도를 한 줄로 표시한다.
 
+<img src="docs/usage-meter.png" alt="usage-meter 미터 줄" width="640">
+
 - 리셋 전에 한도가 소진될 속도면 남은 시간 대신 소진 예상 시각을 표시
 - `구성`: 컨텍스트를 차지하는 항목별 토큰
 - `추이`: 세션/주간 한도의 사용 추이 그래프와 리셋 시 예상 사용률
