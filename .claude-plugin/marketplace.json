@@ -1,14 +1,29 @@
 {
   "name": "claude-mods",
-  "owner": { "name": "ban-dal" },
-  "metadata": { "description": "Claude Code mods" },
+  "owner": {
+    "name": "ban-dal"
+  },
+  "metadata": {
+    "description": "Claude Code mods"
+  },
   "plugins": [
     {
       "name": "usage-meter",
       "description": "프롬프트 위에 컨텍스트 사용량, 세션(5시간) 한도, 주간(7일) 한도를 표시",
       "version": "0.1.0",
-      "author": { "name": "ban-dal" },
+      "author": {
+        "name": "ban-dal"
+      },
       "source": "./plugins/usage-meter"
+    },
+    {
+      "name": "codex-board",
+      "description": "Codex 리뷰·작업 진행 상황을 우측 패널 대시보드로 표시",
+      "version": "0.1.0",
+      "author": {
+        "name": "ban-dal"
+      },
+      "source": "./plugins/codex-board"
     }
   ]
 }
