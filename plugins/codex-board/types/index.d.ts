@@ -72,6 +72,8 @@ declare module 'claude-code' {
       pending: Pending[]
       runs: Record<string, Run>
       defaults: CodexDefaults
+      // 응답이 없어 자동 종료를 시도한 작업 id
+      timedOut: string[]
       expanded: string | null
       scope: Scope
       isDark: boolean

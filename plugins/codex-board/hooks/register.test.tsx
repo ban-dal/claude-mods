@@ -43,10 +43,14 @@ const state = (...jobs: Raw[]) => JSON.stringify({ version: 1, config: {}, jobs 
 function setup(on: On, files: Files) {
   const toasts: string[] = []
   const opened: string[] = []
+  const commands: { argv: readonly string[]; env?: Record<string, string> }[] = []
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
 
-  on('process.run', () => ({ value: { exitCode: 0, stdout: `${CONFIG}\n/tmp/t\n/home/me/.codex`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
+  on('process.run', (_$, e) => {
+    if (e.argv[0] !== 'sh') commands.push({ argv: e.argv, env: e.init?.env })
+    return { value: { exitCode: 0, stdout: `${CONFIG}\n/tmp/t\n/home/me/.codex`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } as never
+  })
   on('session.id', () => ({ value: 'S1' }) as never)
   on('session.root', () => ({ value: '/repo/app' }) as never)
   on('config.list', () => ({ value: [] }) as never)
@@ -82,7 +86,7 @@ function setup(on: On, files: Files) {
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: undefined }) as never)
 
-  return { toasts, opened, clock }
+  return { toasts, opened, commands, clock }
 }
 
 const start = ($: Engine) => $.session.start({ cwd: '/repo/app', surface: null, isInteractive: true })
@@ -438,8 +442,45 @@ describe('codex-board', () => {
     await start($)
     const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
 
-    const stalled = await ui.find({ type: 'Text', text: '마지막 활동 45초 전' })
+    const stalled = await ui.find({ type: 'Text', text: '마지막 활동 45초 전 · 9분 15초 뒤 자동 종료' })
     expect(stalled?.props?.color).toBe('#fbbf24')
+  })
+
+  test('이 세션 작업의 로그가 10분 넘게 멈추면 codex-companion cancel로 한 번만 종료하고 카드에 응답 없음 종료를 표시한다', async ($, on) => {
+    const files: Files = {
+      [`${APP}/state.json`]: state(job({})),
+      [`${APP}/jobs/review-1.log`]: `[${iso(-599_000)}] Running command: rg x`,
+      [`${CONFIG}/plugins/cache/openai-codex/codex/1.0.6/scripts/codex-companion.mjs`]: '',
+      [`${CONFIG}/plugins/cache/openai-codex/codex/1.0.10/scripts/codex-companion.mjs`]: '',
+    }
+    const { commands, toasts, clock } = setup(on, files)
+    await start($)
+    expect(commands).toEqual([])
+
+    await clock.advance(2_000)
+    await clock.advance(2_000)
+    const script = `${CONFIG}/plugins/cache/openai-codex/codex/1.0.10/scripts/codex-companion.mjs`
+    expect(commands).toEqual([
+      { argv: ['node', script, 'cancel', 'review-1', '--cwd', '/repo/app', '--json'], env: { CLAUDE_PLUGIN_DATA: `${CONFIG}/plugins/data/codex-openai-codex` } },
+    ])
+
+    files[`${APP}/state.json`] = state(job({ status: 'cancelled', phase: 'cancelled', updatedAt: iso(3_000), completedAt: iso(3_000) }))
+    await clock.advance(2_000)
+    await clock.advance(2_000)
+    expect(commands).toHaveLength(1)
+    expect(toasts).toEqual(['Codex 리뷰 10분 동안 응답이 없어 종료됨'])
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
+    expect(await ui.find({ type: 'Text', text: '10분 동안 응답이 없어 종료됨' })).toBeTruthy()
+  })
+
+  test('같은 레포에서 다른 세션이 시작한 작업은 로그가 10분 넘게 멈춰도 종료하지 않는다', async ($, on) => {
+    const { commands, clock } = setup(on, {
+      [`${APP}/state.json`]: state(job({ sessionId: 'S2' })),
+      [`${APP}/jobs/review-1.log`]: `[${iso(-1_000_000)}] Running command: rg x`,
+    })
+    await start($)
+    await clock.advance(10_000)
+    expect(commands).toEqual([])
   })
 
   test('작업이 없으면 요청 방법 안내를 표시한다', async ($, on) => {

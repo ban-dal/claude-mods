@@ -4,17 +4,22 @@ import type { ElementTable, EngineInterface, Register, RenderSurface } from 'cla
 import type { Job, JobDetail, Pending, Run, Scope } from '../types'
 import {
   baseName,
+  companionOf,
   countBySeverity,
   elapsedOf,
   formatClock,
   formatElapsed,
+  idleOf,
   isActive,
   kindLabelOf,
+  latestVersion,
+  marketplaceOf,
   parseCodexConfig,
   parseDetail,
   parseRunFlags,
   parseState,
   PHASE_LABEL,
+  pluginDataOf,
   resolveRun,
   SEVERITY_LABEL,
   sortJobs,
@@ -32,6 +37,7 @@ const scope = atom({ plugin: 'codex-board', key: 'scope' } as const, 'mine')
 const isDark = atom({ plugin: 'codex-board', key: 'isDark' } as const, true)
 const runs = atom({ plugin: 'codex-board', key: 'runs' } as const, {})
 const defaults = atom({ plugin: 'codex-board', key: 'defaults' } as const, {})
+const timedOut = atom({ plugin: 'codex-board', key: 'timedOut' } as const, [])
 
 const PANE = 'codex-board'
 const TITLE = 'Codex'
@@ -49,6 +55,9 @@ const RUN_LABEL: Record<string, string> = { review: '리뷰', 'adversarial-revie
 const SPINNER = ['◐', '◓', '◑', '◒']
 // 로그가 이만큼 멈춰 있으면 마지막 활동 시각을 표시한다
 const STALL_MS = 30_000
+// 로그가 이만큼 멈춰 있으면 응답 없는 작업으로 보고 codex-companion cancel로 종료한다
+const TIMEOUT_MS = 10 * 60_000
+const CANCEL_TIMEOUT_MS = 60_000
 
 type Dirs = { configDir: string; tmpDir: string; codexHome: string }
 type Context = Dirs & { sessionId: string; root: string; startedAt: number }
@@ -84,8 +93,7 @@ async function claimRuns($: EngineInterface, list: Job[], waiting: Pending[]): P
     const match = list
       .filter(
         job =>
-          // 다른 세션이 같은 레포에서 시작한 작업에는 붙이지 않는다
-          (job.sessionId === undefined ? isMine(job) : job.sessionId === context.sessionId) &&
+          isOwn(job) &&
           job.kind === one.kind &&
           known[job.id] === undefined &&
           claimed[job.id] === undefined &&
@@ -119,6 +127,8 @@ async function stateRoots($: EngineInterface): Promise<string[]> {
 }
 
 const isMine = (job: Job) => job.sessionId === context.sessionId || job.workspaceRoot === context.root
+// 다른 세션이 같은 레포에서 시작한 작업은 빼고, 세션 ID가 없는 작업만 레포로 판단한다
+const isOwn = (job: Job) => (job.sessionId === undefined ? isMine(job) : job.sessionId === context.sessionId)
 const inScope = (current: Scope) => (job: Job) => current === 'all' || isMine(job)
 
 async function loadJobs($: EngineInterface): Promise<Job[]> {
@@ -163,9 +173,9 @@ async function loadDetails($: EngineInterface, list: Job[], current: Record<stri
   return next
 }
 
-function outcomeOf(job: Job, detail: JobDetail | undefined): string {
+function outcomeOf(job: Job, detail: JobDetail | undefined, stopped: readonly string[]): string {
   if (job.status === 'failed') return `실패${job.errorMessage ? ` · ${job.errorMessage}` : ''}`
-  if (job.status === 'cancelled') return '취소됨'
+  if (job.status === 'cancelled') return stopped.includes(job.id) ? `${TIMEOUT_MS / 60_000}분 동안 응답이 없어 종료됨` : '취소됨'
   const counts = countBySeverity(detail?.findings ?? [])
   const found = counts.map(([severity, count]) => `${SEVERITY_LABEL[severity]} ${count}`).join(' · ')
   if (detail?.verdict === 'approve') return '승인'
@@ -174,7 +184,7 @@ function outcomeOf(job: Job, detail: JobDetail | undefined): string {
   return '완료'
 }
 
-async function notify($: EngineInterface, before: Job[], after: Job[], loaded: Record<string, JobDetail>) {
+async function notify($: EngineInterface, before: Job[], after: Job[], loaded: Record<string, JobDetail>, stopped: readonly string[]) {
   const previous = new Map(before.map(job => [job.id, job]))
   let hasStarted = false
   for (const job of after.filter(isMine)) {
@@ -187,10 +197,49 @@ async function notify($: EngineInterface, before: Job[], after: Job[], loaded: R
     // 두 번의 갱신 사이에 시작하고 끝난 작업도 알린다
     const hasFinishedSinceStart = old === undefined && Date.parse(job.completedAt ?? job.updatedAt) >= context.startedAt
     if (isStartedHere && !isActive(job) && ((old !== undefined && isActive(old)) || hasFinishedSinceStart)) {
-      $.ui.toast(`Codex ${kindLabelOf(job)} ${outcomeOf(job, loaded[job.id])}`)
+      $.ui.toast(`Codex ${kindLabelOf(job)} ${outcomeOf(job, loaded[job.id], stopped)}`)
     }
   }
   if (hasStarted) await $.ui.open({ id: PANE, title: TITLE })
+}
+
+// 플러그인 캐시의 최신 버전을 먼저 찾고, 없으면 요청 명령에서 본 경로를 쓴다
+async function companionFor($: EngineInterface, job: Job): Promise<string | undefined> {
+  const market = marketplaceOf(job.stateDir)
+  if (market !== undefined) {
+    const base = `${context.configDir}/plugins/cache/${market}/codex`
+    const versions = (await $.fs.list(base).catch(() => [])).filter(entry => entry.kind === 'dir').map(entry => entry.name)
+    const version = latestVersion(versions)
+    if (version !== undefined) return `${base}/${version}/scripts/codex-companion.mjs`
+  }
+  const seen = await $.store.get('companion')
+  return typeof seen === 'string' ? seen : undefined
+}
+
+async function cancel($: EngineInterface, job: Job) {
+  const script = await companionFor($, job)
+  const result =
+    script === undefined
+      ? undefined
+      : await $.process
+          .run(['node', script, 'cancel', job.id, '--cwd', job.workspaceRoot, '--json'], {
+            cwd: job.workspaceRoot,
+            env: { CLAUDE_PLUGIN_DATA: pluginDataOf(job.stateDir) },
+            timeoutMs: CANCEL_TIMEOUT_MS,
+          })
+          .catch(() => undefined)
+  if (result?.exitCode !== 0) $.ui.toast(`Codex ${kindLabelOf(job)} 자동 종료 실패 · /codex:cancel ${job.id}`)
+}
+
+// 이 세션의 응답 없는 작업마다 한 번만 종료를 시도한다. 종료는 갱신을 막지 않도록 기다리지 않는다
+async function stopIdle($: EngineInterface, list: Job[], loaded: Record<string, JobDetail>, now: number) {
+  const tried = await read($, timedOut)
+  const idle = list.filter(job => isOwn(job) && !tried.includes(job.id) && (idleOf(job, loaded[job.id], now) ?? 0) >= TIMEOUT_MS)
+  const ids = new Set(list.map(job => job.id))
+  const kept = tried.filter(id => ids.has(id))
+  if (idle.length === 0 && kept.length === tried.length) return
+  await update($, timedOut, () => [...kept, ...idle.map(job => job.id)])
+  for (const job of idle) void cancel($, job)
 }
 
 async function refresh($: EngineInterface) {
@@ -206,12 +255,14 @@ async function refresh($: EngineInterface) {
 
     if (JSON.stringify(before) !== JSON.stringify(after)) await update($, jobs, () => after)
     if (JSON.stringify(await read($, details)) !== JSON.stringify(loaded)) await update($, details, () => loaded)
-    await notify($, before, after, loaded)
+    await notify($, before, after, loaded, await read($, timedOut))
 
     await refreshDefaults($)
 
-    // 상태 파일에 작업이 생겼거나 오래된 요청은 지운다
     const now = await $.clock.now()
+    await stopIdle($, visible, loaded, now)
+
+    // 상태 파일에 작업이 생겼거나 오래된 요청은 지운다
     const waiting = await read($, pending)
     const matched = await claimRuns($, after, waiting)
     const kept = waiting.filter(one => now - one.at < PENDING_TTL && !matched.has(one.id))
@@ -298,6 +349,9 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const kind = e.command.match(CODEX_RUN)?.[1]
     if (kind === undefined || e.tool_use_id === undefined) return next(e)
+    // 상태 디렉터리로 플러그인 위치를 알 수 없을 때 종료에 쓴다
+    const script = companionOf(e.command)
+    if (script?.startsWith('/') === true) await $.store.set('companion', script)
     const request = { id: e.tool_use_id, label: `Codex ${RUN_LABEL[kind] ?? kind}`, kind, run: parseRunFlags(e.command) }
     return track($, request, () => next(e))
   })
@@ -319,6 +373,7 @@ export const register: Register = on => {
     const waiting = (await read($, pending)).filter(one => one.isDone !== true)
     const requested = await read($, runs)
     const configured = await read($, defaults)
+    const stopped = await read($, timedOut)
     const now = await $.clock.now()
     const width = e.props.bodyColumns
     const spinner = SPINNER[Math.floor(now / TICK_MS) % SPINNER.length] ?? '◐'
@@ -405,8 +460,8 @@ export const register: Register = on => {
       const detail = loaded[job.id]
       const elapsed = elapsedOf(job, now)
       const isOpen = opened === job.id
-      const lastActivity = Date.parse(detail?.lastActivityAt ?? '')
-      const idleMs = isActive(job) && !Number.isNaN(lastActivity) ? now - lastActivity : undefined
+      const idleMs = idleOf(job, detail, now)
+      const untilStop = isOwn(job) && idleMs !== undefined ? TIMEOUT_MS - idleMs : undefined
       const canOpen = !isActive(job) && detail !== undefined && (detail.rendered !== undefined || (detail.findings?.length ?? 0) > 0)
       const where = job.workspaceRoot === context.root ? '' : `${baseName(job.workspaceRoot)} · `
       const used = resolveRun(job, requested[job.id], detail?.request, configured)
@@ -439,7 +494,9 @@ export const register: Register = on => {
           )}
           {isActive(job) && stepper(job)}
           {idleMs !== undefined && idleMs >= STALL_MS && (
-            <Text color={palette.warn}>마지막 활동 {formatElapsed(idleMs)} 전</Text>
+            <Text color={palette.warn} wrap="truncate-end">
+              마지막 활동 {formatElapsed(idleMs)} 전{untilStop !== undefined && untilStop > 0 ? ` · ${formatElapsed(untilStop)} 뒤 자동 종료` : ''}
+            </Text>
           )}
           {isActive(job) &&
             (detail?.logTail ?? []).slice(-3).map((line, index) => (
@@ -449,7 +506,7 @@ export const register: Register = on => {
             ))}
           {!isActive(job) && (
             <Text color={status.color} wrap="truncate-end">
-              {outcomeOf(job, detail)}
+              {outcomeOf(job, detail, stopped)}
             </Text>
           )}
           <Box flexDirection="row" justifyContent="space-between" columnGap={1}>

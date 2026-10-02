@@ -304,3 +304,27 @@ export function elapsedOf(job: Job, now: number): number | undefined {
 export function baseName(path: string): string {
   return path.split('/').filter(Boolean).pop() ?? path
 }
+
+// 진행 중인 작업의 마지막 로그 시각부터 지난 시간. 로그가 없으면 상태 갱신 시각부터 센다
+export function idleOf(job: Job, detail: JobDetail | undefined, now: number): number | undefined {
+  if (!isActive(job)) return undefined
+  const last = Date.parse(detail?.lastActivityAt ?? job.updatedAt)
+  return Number.isNaN(last) ? undefined : now - last
+}
+
+export function companionOf(command: string): string | undefined {
+  return tokensOf(command).find(token => /codex-companion\.mjs$/.test(token))
+}
+
+// 상태 디렉터리에서 codex-companion이 쓰던 CLAUDE_PLUGIN_DATA를 되찾는다. 임시 디렉터리 상태면 빈 값
+export function pluginDataOf(stateDir: string): string {
+  return stateDir.match(/^(.*\/plugins\/data\/[^/]+)\/state\/[^/]+$/)?.[1] ?? ''
+}
+
+export function marketplaceOf(stateDir: string): string | undefined {
+  return stateDir.match(/\/plugins\/data\/codex-([^/]+)\/state\//)?.[1]
+}
+
+export function latestVersion(names: string[]): string | undefined {
+  return [...names].sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0]
+}
