@@ -92,7 +92,7 @@ async function claimRuns($: EngineInterface, list: Job[], waiting: Pending[]): P
       )
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
     if (match === undefined) continue
-    claimed[match.id] = one.run ?? {}
+    claimed[match.id] = one.isAmbiguous === true ? {} : (one.run ?? {})
     matched.add(one.id)
   }
   if (matched.size === 0) return matched
@@ -154,7 +154,8 @@ async function loadDetails($: EngineInterface, list: Job[], current: Record<stri
       continue
     }
     const jobFile = `${job.stateDir}/jobs/${job.id}.json`
-    const source = isActive(job) ? undefined : await $.fs.read(jobFile).catch(() => undefined)
+    // 진행 중에도 백그라운드 작업의 요청 값을 읽는다
+    const source = await $.fs.read(jobFile).catch(() => undefined)
     const log = await $.fs.read(job.logFile ?? `${job.stateDir}/jobs/${job.id}.log`).catch(() => undefined)
     next[job.id] = parseDetail(typeof source === 'string' ? source : undefined, typeof log === 'string' ? log : undefined, job.updatedAt)
   }
@@ -228,12 +229,18 @@ async function refreshTheme($: EngineInterface) {
 // 요청이 끝나면 성공·실패와 상관없이 '요청 중' 행을 지운다
 async function track<T>($: EngineInterface, request: Omit<Pending, 'at'>, run: () => Promise<T>): Promise<T> {
   const now = await $.clock.now()
-  await update($, pending, list => [...list.filter(one => one.id !== request.id), { ...request, at: now }])
+  await update($, pending, list => {
+    const others = list.filter(one => one.id !== request.id)
+    const runOf = (one: Pick<Pending, 'run'>) => JSON.stringify(one.run ?? {})
+    const clashes = (one: Pending) => one.kind === request.kind && runOf(one) !== runOf(request)
+    const isAmbiguous = others.some(clashes)
+    return [...others.map(one => (clashes(one) ? { ...one, isAmbiguous: true } : one)), { ...request, at: now, ...(isAmbiguous ? { isAmbiguous } : {}) }]
+  })
   await $.ui.open({ id: PANE, title: TITLE })
   try {
     return await run()
   } finally {
-    await claimRuns($, await loadJobs($), (await read($, pending)).filter(one => one.id === request.id))
+    await claimRuns($, await loadJobs($), await read($, pending))
     await update($, pending, list => list.filter(one => one.id !== request.id))
     await refresh($)
   }

@@ -245,9 +245,9 @@ export function parseCodexConfig(toml: string): CodexDefaults {
 
 export type ResolvedRun = { model?: string; effort?: string; isDefault: boolean }
 
-// 요청 명령 > 작업 파일 > config.toml 순으로 고른다
+// 작업 파일 > 요청 명령 > config.toml 순으로 고른다
 export function resolveRun(job: Job, run: Run | undefined, request: Run | undefined, defaults: CodexDefaults): ResolvedRun | undefined {
-  const known = { ...request, ...run }
+  const known = { ...run, ...request }
   const fallbackModel = job.kind === 'review' ? (defaults.reviewModel ?? defaults.model) : defaults.model
   const model = known.model ?? fallbackModel
   const effort = known.effort ?? defaults.effort

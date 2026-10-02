@@ -56,6 +56,8 @@ export type Pending = {
   kind: string
   at: number
   run?: Run
+  // 값이 다른 같은 종류의 요청과 겹쳐 어느 작업의 것인지 알 수 없음
+  isAmbiguous?: boolean
 }
 
 export type Scope = 'mine' | 'all'

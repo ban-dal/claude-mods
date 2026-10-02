@@ -202,6 +202,40 @@ describe('codex-board', () => {
     expect(await ui.find({ type: 'Text', text: /gpt-5\.3-codex-spark · high$/ })).toBeTruthy()
   })
 
+  test('값이 다른 같은 종류의 요청 두 개가 겹치면 명령의 model을 붙이지 않고 기본 설정을 표시한다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state(), '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\n' }
+    setup(on, files)
+    const releases: (() => void)[] = []
+    on('tool.call', { tool: 'Bash' }, async () => {
+      await new Promise<void>(resolve => releases.push(resolve))
+      return { result: { stdout: '', stderr: '', interrupted: false } } as never
+    })
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
+
+    const first = $.tool.call({ tool: 'Bash', tool_use_id: 'a', command: 'node /p/codex-companion.mjs review --model gpt-6-sol' } as never)
+    const second = $.tool.call({ tool: 'Bash', tool_use_id: 'b', command: 'node /p/codex-companion.mjs review --model gpt-5.5' } as never)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    files[`${APP}/state.json`] = state(job({ id: 'review-b', createdAt: iso(100) }), job({ id: 'review-a', createdAt: iso(200) }))
+    releases.forEach(release => release())
+    await Promise.all([first, second])
+
+    expect(await ui.find({ type: 'Text', text: /gpt-6-sol|gpt-5\.5/ })).toBeFalsy()
+    expect(await ui.findAll({ type: 'Text', text: /gpt-6\.1-sol \(기본 설정\)$/ })).toHaveLength(2)
+  })
+
+  test('진행 중인 백그라운드 작업은 작업 파일의 요청 model과 effort를 표시한다', async ($, on) => {
+    setup(on, {
+      [`${APP}/state.json`]: state(job({ id: 'task-2', kind: 'task', title: 'Codex Task' })),
+      [`${APP}/jobs/task-2.json`]: JSON.stringify({ status: 'running', request: { model: 'gpt-5.5', effort: 'xhigh' } }),
+      '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "medium"\n',
+    })
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
+
+    expect(await ui.find({ type: 'Text', text: /gpt-5\.5 · xhigh$/ })).toBeTruthy()
+  })
+
   test('동시에 실행한 리뷰와 작업 요청은 각자 같은 종류의 작업에 model을 붙인다', async ($, on) => {
     const files: Files = { [`${APP}/state.json`]: state() }
     setup(on, files)
