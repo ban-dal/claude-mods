@@ -1,4 +1,4 @@
-import type { Finding, Job, JobDetail, JobStatus, Severity } from '../types'
+import type { CodexDefaults, Finding, Job, JobDetail, JobStatus, Run, Severity } from '../types'
 
 const STATUSES: readonly JobStatus[] = ['queued', 'running', 'completed', 'failed', 'cancelled']
 const SEVERITIES: readonly Severity[] = ['critical', 'high', 'medium', 'low']
@@ -161,6 +161,9 @@ export function parseDetail(source: string | undefined, log: string | undefined,
     if (detail.findings === undefined && payload.review === 'Review') {
       detail.findings = nativeFindings(text(codex.stdout) ?? '')
     }
+    const request = (stored.request ?? {}) as Record<string, unknown>
+    const requested = { model: text(request.model), effort: text(request.effort) }
+    if (requested.model !== undefined || requested.effort !== undefined) detail.request = requested
     const rendered = text(stored.rendered)
     if (rendered !== undefined) {
       detail.rendered = rendered.length > RENDERED_LIMIT ? `${rendered.slice(0, RENDERED_LIMIT)}\n\n…(생략)` : rendered
@@ -169,6 +172,46 @@ export function parseDetail(source: string | undefined, log: string | undefined,
     // 작성 중인 파일은 다음 갱신 때 다시 읽는다
   }
   return detail
+}
+
+// codex-companion이 받아들이는 모델 별칭
+const MODEL_ALIAS: Record<string, string> = { spark: 'gpt-5.3-codex-spark' }
+
+const flagOf = (command: string, names: string): string | undefined =>
+  command.match(new RegExp(`(?:^|\\s)(?:${names})(?:=|\\s+)(["']?)([^\\s"']+)\\1`))?.[2]
+
+export function parseRunFlags(command: string): Run {
+  const model = flagOf(command, '--model|-m')
+  const effort = flagOf(command, '--effort')
+  return {
+    ...(model === undefined ? {} : { model: MODEL_ALIAS[model.toLowerCase()] ?? model }),
+    ...(effort === undefined ? {} : { effort: effort.toLowerCase() }),
+  }
+}
+
+export function parseCodexConfig(toml: string): CodexDefaults {
+  const top = toml.split(/^\s*\[/m)[0] ?? ''
+  const value = (key: string) => top.match(new RegExp(`^\\s*${key}\\s*=\\s*["']([^"']+)["']`, 'm'))?.[1]
+  const defaults: CodexDefaults = {}
+  const model = value('model')
+  const effort = value('model_reasoning_effort')
+  const reviewModel = value('review_model')
+  if (model !== undefined) defaults.model = model
+  if (effort !== undefined) defaults.effort = effort
+  if (reviewModel !== undefined) defaults.reviewModel = reviewModel
+  return defaults
+}
+
+export type ResolvedRun = { model?: string; effort?: string; isDefault: boolean }
+
+// 요청 명령 > 작업 파일 > config.toml 순으로 고른다
+export function resolveRun(job: Job, run: Run | undefined, request: Run | undefined, defaults: CodexDefaults): ResolvedRun | undefined {
+  const known = { ...request, ...run }
+  const fallbackModel = job.kind === 'review' ? (defaults.reviewModel ?? defaults.model) : defaults.model
+  const model = known.model ?? fallbackModel
+  const effort = known.effort ?? defaults.effort
+  if (model === undefined && effort === undefined) return undefined
+  return { model, effort, isDefault: known.model === undefined || known.effort === undefined }
 }
 
 export function countBySeverity(findings: Finding[]): [Severity, number][] {

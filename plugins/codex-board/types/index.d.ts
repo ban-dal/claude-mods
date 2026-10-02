@@ -34,13 +34,24 @@ export type JobDetail = {
   verdict?: string
   findings?: Finding[]
   rendered?: string
+  // 백그라운드 작업이 작업 파일에 남긴 요청 값
+  request?: Run
 }
+
+export type Run = {
+  model?: string
+  effort?: string
+}
+
+// ~/.codex/config.toml 최상위 기본값
+export type CodexDefaults = Run & { reviewModel?: string }
 
 // tool.call로 감지했지만 아직 상태 파일에 작업이 생기지 않은 요청
 export type Pending = {
   id: string
   label: string
   at: number
+  run?: Run
 }
 
 export type Scope = 'mine' | 'all'
@@ -51,6 +62,8 @@ declare module 'claude-code' {
       jobs: Job[]
       details: Record<string, JobDetail>
       pending: Pending[]
+      runs: Record<string, Run>
+      defaults: CodexDefaults
       expanded: string | null
       scope: Scope
       isDark: boolean

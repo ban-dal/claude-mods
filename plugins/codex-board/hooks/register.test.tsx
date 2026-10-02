@@ -46,7 +46,7 @@ function setup(on: On, files: Files) {
   const clock = mock.clock(on, { now: NOW })
   mock.store(on)
 
-  on('process.run', () => ({ value: { exitCode: 0, stdout: `${CONFIG}\n/tmp/t`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: `${CONFIG}\n/tmp/t\n/home/me/.codex`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never)
   on('session.id', () => ({ value: 'S1' }) as never)
   on('session.root', () => ({ value: '/repo/app' }) as never)
   on('config.list', () => ({ value: [] }) as never)
@@ -173,6 +173,43 @@ describe('codex-board', () => {
     await clock.advance(10_000)
 
     expect(opened).toEqual([])
+  })
+
+  test('이전 세션에서 시작한 작업이 끝나면 완료 토스트를 띄우지 않는다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state(job({ sessionId: 'S0', createdAt: iso(-600_000) })) }
+    const { toasts, clock } = setup(on, files)
+    await start($)
+
+    files[`${APP}/state.json`] = state(job({ sessionId: 'S0', createdAt: iso(-600_000), status: 'completed', phase: 'done', updatedAt: iso(500), completedAt: iso(500) }))
+    await clock.advance(10_000)
+
+    expect(toasts).toEqual([])
+  })
+
+  test('--model, --effort로 요청한 작업은 카드에 그 model과 effort를 표시한다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state(), '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "medium"\n' }
+    setup(on, files)
+    on('tool.call', { tool: 'Bash' }, () => {
+      files[`${APP}/state.json`] = state(job({ createdAt: iso(100), startedAt: iso(100) }))
+      return { result: { stdout: '', stderr: '', interrupted: false } } as never
+    })
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
+
+    await $.tool.call({ tool: 'Bash', tool_use_id: 't3', command: 'node codex-companion.mjs task --model spark --effort high "fix"' } as never)
+
+    expect(await ui.find({ type: 'Text', text: /gpt-5\.3-codex-spark · high$/ })).toBeTruthy()
+  })
+
+  test('요청 값을 모르는 작업은 config.toml의 model과 effort를 "(기본 설정)"과 함께 표시한다', async ($, on) => {
+    setup(on, {
+      [`${APP}/state.json`]: state(job({})),
+      '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "medium"\n\n[plugins."x"]\nmodel = "other"\n',
+    })
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'desktop', ...PANE })
+
+    expect(await ui.find({ type: 'Text', text: /gpt-6\.1-sol · medium \(기본 설정\)$/ })).toBeTruthy()
   })
 
   test('범위가 "이 세션"이면 다른 세션·레포의 작업을 숨기고 "전체"로 바꾸면 표시한다', async ($, on) => {

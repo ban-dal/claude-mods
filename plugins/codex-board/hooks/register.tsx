@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { ElementTable, EngineInterface, Register, RenderSurface } from 'claude-code'
 
-import type { Job, JobDetail, Pending, Scope } from '../types'
+import type { Job, JobDetail, Pending, Run, Scope } from '../types'
 import {
   baseName,
   countBySeverity,
@@ -10,9 +10,12 @@ import {
   formatElapsed,
   isActive,
   kindLabelOf,
+  parseCodexConfig,
   parseDetail,
+  parseRunFlags,
   parseState,
   PHASE_LABEL,
+  resolveRun,
   SEVERITY_LABEL,
   sortJobs,
   stepOf,
@@ -27,6 +30,8 @@ const pending = atom({ plugin: 'codex-board', key: 'pending' } as const, [])
 const expanded = atom({ plugin: 'codex-board', key: 'expanded' } as const, null)
 const scope = atom({ plugin: 'codex-board', key: 'scope' } as const, 'mine')
 const isDark = atom({ plugin: 'codex-board', key: 'isDark' } as const, true)
+const runs = atom({ plugin: 'codex-board', key: 'runs' } as const, {})
+const defaults = atom({ plugin: 'codex-board', key: 'defaults' } as const, {})
 
 const PANE = 'codex-board'
 const TITLE = 'Codex'
@@ -45,20 +50,46 @@ const SPINNER = ['◐', '◓', '◑', '◒']
 // 로그가 이만큼 멈춰 있으면 마지막 활동 시각을 표시한다
 const STALL_MS = 30_000
 
-type Context = { sessionId: string; root: string; configDir: string; tmpDir: string; startedAt: number }
+type Dirs = { configDir: string; tmpDir: string; codexHome: string }
+type Context = Dirs & { sessionId: string; root: string; startedAt: number }
 
 // 세션 정보는 재로드 때 session.start에서 다시 채운다
-let context: Context = { sessionId: '', root: '', configDir: '', tmpDir: '/tmp', startedAt: 0 }
+let context: Context = { sessionId: '', root: '', configDir: '', tmpDir: '/tmp', codexHome: '', startedAt: 0 }
 let ticks = 0
 let isRefreshing = false
 
-async function locateDirs($: EngineInterface): Promise<{ configDir: string; tmpDir: string }> {
+async function locateDirs($: EngineInterface): Promise<Dirs> {
   const probe = await $.process
-    .run(['sh', '-c', 'printf "%s\\n%s" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${TMPDIR:-/tmp}"'])
+    .run(['sh', '-c', 'printf "%s\\n%s\\n%s" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "${TMPDIR:-/tmp}" "${CODEX_HOME:-$HOME/.codex}"'])
     .catch(() => undefined)
-  const [configDir = '', tmpDir = ''] = (probe?.stdout ?? '').split('\n').map(line => line.trim().replace(/\/$/, ''))
+  const [configDir = '', tmpDir = '', codexHome = ''] = (probe?.stdout ?? '').split('\n').map(line => line.trim().replace(/\/$/, ''))
   const fromRoot = $.plugin.root.match(/^(.*?)\/(?:plugins\/cache|dev-mods)\//)?.[1]
-  return { configDir: configDir || fromRoot || '', tmpDir: tmpDir || '/tmp' }
+  return { configDir: configDir || fromRoot || '', tmpDir: tmpDir || '/tmp', codexHome }
+}
+
+async function refreshDefaults($: EngineInterface) {
+  if (context.codexHome === '') return
+  const toml = await $.fs.read(`${context.codexHome}/config.toml`).catch(() => undefined)
+  const next = typeof toml === 'string' ? parseCodexConfig(toml) : {}
+  if (JSON.stringify(await read($, defaults)) !== JSON.stringify(next)) await update($, defaults, () => next)
+}
+
+// 요청 명령에서 읽은 model·effort를 그 뒤에 생긴 작업에 붙인다
+async function claimRuns($: EngineInterface, list: Job[], waiting: Pending[]) {
+  const known = await read($, runs)
+  const claimed: Record<string, Run> = {}
+  for (const one of waiting) {
+    if (one.run === undefined) continue
+    const match = list
+      .filter(job => isMine(job) && known[job.id] === undefined && claimed[job.id] === undefined && Date.parse(job.createdAt) >= one.at - 5_000)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0]
+    if (match !== undefined) claimed[match.id] = one.run
+  }
+  if (Object.keys(claimed).length === 0) return
+  const ids = new Set(list.map(job => job.id))
+  const kept = Object.fromEntries(Object.entries(known).filter(([id]) => ids.has(id)))
+  const saved = await update($, runs, () => ({ ...kept, ...claimed }))
+  await $.store.set('runs', saved).catch(() => undefined)
 }
 
 // 첫 Codex 요청 때 생기는 디렉터리도 잡도록 갱신할 때마다 다시 찾는다
@@ -135,7 +166,7 @@ async function notify($: EngineInterface, before: Job[], after: Job[], loaded: R
     if (isActive(job) && isStartedHere && (old === undefined || !isActive(old))) hasStarted = true
     // 두 번의 갱신 사이에 시작하고 끝난 작업도 알린다
     const hasFinishedSinceStart = old === undefined && Date.parse(job.completedAt ?? job.updatedAt) >= context.startedAt
-    if (!isActive(job) && ((old !== undefined && isActive(old)) || hasFinishedSinceStart)) {
+    if (isStartedHere && !isActive(job) && ((old !== undefined && isActive(old)) || hasFinishedSinceStart)) {
       $.ui.toast(`Codex ${kindLabelOf(job)} ${outcomeOf(job, loaded[job.id])}`)
     }
   }
@@ -157,9 +188,12 @@ async function refresh($: EngineInterface) {
     if (JSON.stringify(await read($, details)) !== JSON.stringify(loaded)) await update($, details, () => loaded)
     await notify($, before, after, loaded)
 
+    await refreshDefaults($)
+
     // 상태 파일에 작업이 생겼거나 오래된 요청은 지운다
     const now = await $.clock.now()
     const waiting = await read($, pending)
+    await claimRuns($, after, waiting)
     const kept = waiting.filter(
       one => now - one.at < PENDING_TTL && !after.some(job => isMine(job) && Date.parse(job.createdAt) >= one.at - 5_000),
     )
@@ -176,14 +210,15 @@ async function refreshTheme($: EngineInterface) {
 }
 
 // 요청이 끝나면 성공·실패와 상관없이 '요청 중' 행을 지운다
-async function track<T>($: EngineInterface, id: string, label: string, run: () => Promise<T>): Promise<T> {
+async function track<T>($: EngineInterface, request: Omit<Pending, 'at'>, run: () => Promise<T>): Promise<T> {
   const now = await $.clock.now()
-  await update($, pending, list => [...list.filter(one => one.id !== id), { id, label, at: now }])
+  await update($, pending, list => [...list.filter(one => one.id !== request.id), { ...request, at: now }])
   await $.ui.open({ id: PANE, title: TITLE })
   try {
     return await run()
   } finally {
-    await update($, pending, list => list.filter(one => one.id !== id))
+    await claimRuns($, await loadJobs($), (await read($, pending)).filter(one => one.id === request.id))
+    await update($, pending, list => list.filter(one => one.id !== request.id))
     await refresh($)
   }
 }
@@ -192,6 +227,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: COMMAND, description: 'Codex 리뷰 대시보드 열기/닫기' })
     context = { sessionId: await $.session.id(), root: await $.session.root(), ...(await locateDirs($)), startedAt: await $.clock.now() }
+    const stored = await $.store.get('runs')
+    if (stored !== null && typeof stored === 'object') await update($, runs, () => stored as Record<string, Run>)
     await refreshTheme($)
     await refresh($)
 
@@ -234,12 +271,13 @@ export const register: Register = on => {
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const kind = e.command.match(CODEX_RUN)?.[1]
     if (kind === undefined || e.tool_use_id === undefined) return next(e)
-    return track($, e.tool_use_id, `Codex ${RUN_LABEL[kind] ?? kind}`, () => next(e))
+    const request = { id: e.tool_use_id, label: `Codex ${RUN_LABEL[kind] ?? kind}`, run: parseRunFlags(e.command) }
+    return track($, request, () => next(e))
   })
 
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     if (e.subagent_type !== 'codex:codex-rescue' || e.tool_use_id === undefined) return next(e)
-    return track($, e.tool_use_id, 'Codex rescue 위임', () => next(e))
+    return track($, { id: e.tool_use_id, label: 'Codex rescue 위임' }, () => next(e))
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -252,6 +290,8 @@ export const register: Register = on => {
     const loaded = await read($, details)
     const opened = await read($, expanded)
     const waiting = await read($, pending)
+    const requested = await read($, runs)
+    const configured = await read($, defaults)
     const now = await $.clock.now()
     const width = e.props.bodyColumns
     const spinner = SPINNER[Math.floor(now / TICK_MS) % SPINNER.length] ?? '◐'
@@ -342,6 +382,8 @@ export const register: Register = on => {
       const idleMs = isActive(job) && !Number.isNaN(lastActivity) ? now - lastActivity : undefined
       const canOpen = !isActive(job) && detail !== undefined && (detail.rendered !== undefined || (detail.findings?.length ?? 0) > 0)
       const where = job.workspaceRoot === context.root ? '' : `${baseName(job.workspaceRoot)} · `
+      const used = resolveRun(job, requested[job.id], detail?.request, configured)
+      const usedLabel = used === undefined ? undefined : [used.model, used.effort].filter(Boolean).join(' · ')
 
       return (
         <Box
@@ -387,6 +429,8 @@ export const register: Register = on => {
             <Text color={palette.muted} wrap="truncate-end">
               {where}
               {formatClock(job.startedAt ?? job.createdAt)} 시작
+              {usedLabel ? ` · ${usedLabel}` : ''}
+              {used?.isDefault ? ' (기본 설정)' : ''}
             </Text>
             {canOpen && <Button key={`open-${job.id}`} label={isOpen ? '접기 ▴' : '결과 ▾'} plain onPress={toggleJob(job.id)} />}
           </Box>
