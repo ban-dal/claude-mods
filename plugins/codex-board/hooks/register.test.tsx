@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
-import { parseDetail, parseRunFlags, resolveRun, runLabel } from './jobs'
+import { parseDetail, parseRunFlags } from './jobs'
 
 const NOW = Date.parse('2026-10-02T10:00:00Z')
 const CONFIG = '/home/me/.claude'
@@ -202,7 +202,7 @@ describe('codex-board', () => {
     expect(await ui.find({ type: 'Text', text: /gpt-5\.3-codex-spark · high$/ })).toBeTruthy()
   })
 
-  test('값이 다른 같은 종류의 요청 두 개가 겹치면 명령의 model을 붙이지 않고 기본 설정을 표시한다', async ($, on) => {
+  test('값이 다른 같은 종류의 요청 두 개가 겹치면 명령의 model을 붙이지 않고 config.toml의 model을 표시한다', async ($, on) => {
     const files: Files = { [`${APP}/state.json`]: state(), '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\n' }
     setup(on, files)
     const releases: (() => void)[] = []
@@ -221,7 +221,7 @@ describe('codex-board', () => {
     await Promise.all([first, second])
 
     expect(await ui.find({ type: 'Text', text: /gpt-6-sol|gpt-5\.5/ })).toBeFalsy()
-    expect(await ui.findAll({ type: 'Text', text: /gpt-6\.1-sol \(기본 설정\)$/ })).toHaveLength(2)
+    expect(await ui.findAll({ type: 'Text', text: /gpt-6\.1-sol$/ })).toHaveLength(2)
   })
 
   test('진행 중인 백그라운드 작업은 작업 파일의 요청 model과 effort를 표시한다', async ($, on) => {
@@ -289,10 +289,10 @@ describe('codex-board', () => {
     await $.tool.call({ tool: 'Bash', tool_use_id: 'x', command: 'node /p/codex-companion.mjs review --model gpt-6-sol' } as never)
 
     expect(await ui.find({ type: 'Text', text: /gpt-6-sol/ })).toBeFalsy()
-    expect(await ui.find({ type: 'Text', text: /gpt-6\.1-sol \(기본 설정\)$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /gpt-6\.1-sol$/ })).toBeTruthy()
   })
 
-  test('요청 값을 모르는 작업은 config.toml의 model과 effort를 "(기본 설정)"과 함께 표시한다', async ($, on) => {
+  test('요청 값을 모르는 작업은 config.toml의 model과 effort를 표시한다', async ($, on) => {
     setup(on, {
       [`${APP}/state.json`]: state(job({})),
       '/home/me/.codex/config.toml': 'model = "gpt-6.1-sol"\nmodel_reasoning_effort = "medium"\n\n[plugins."x"]\nmodel = "other"\n',
@@ -300,7 +300,7 @@ describe('codex-board', () => {
     await start($)
     const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'desktop', ...PANE })
 
-    expect(await ui.find({ type: 'Text', text: /gpt-6\.1-sol · medium \(기본 설정\)$/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /gpt-6\.1-sol · medium$/ })).toBeTruthy()
   })
 
   test('같은 레포에서 다른 세션이 새로 시작한 작업으로는 패널을 열거나 토스트를 띄우지 않는다', async ($, on) => {
@@ -479,26 +479,6 @@ describe('parseRunFlags 인자 묶음', () => {
 
   test('-- 뒤의 --model은 프롬프트로 보고 읽지 않는다', () => {
     expect(parseRunFlags('node /p/codex-companion.mjs task --effort low -- --model spark')).toEqual({ effort: 'low' })
-  })
-})
-
-describe('resolveRun', () => {
-  test('--model만 명시하고 config.toml에 effort가 없으면 "(기본 설정)"으로 보지 않는다', () => {
-    const job = { kind: 'review' } as Parameters<typeof resolveRun>[0]
-    const used = resolveRun(job, { model: 'gpt-6-sol' }, undefined, { model: 'gpt-6.1-sol' })
-    expect(used && runLabel(used)).toBe('gpt-6-sol')
-  })
-
-  test('명령의 model과 config.toml의 effort는 "gpt-6-sol · medium (effort 기본 설정)"으로 표시한다', () => {
-    const job = { kind: 'review' } as Parameters<typeof resolveRun>[0]
-    const used = resolveRun(job, { model: 'gpt-6-sol' }, undefined, { model: 'gpt-6.1-sol', effort: 'medium' })
-    expect(used && runLabel(used)).toBe('gpt-6-sol · medium (effort 기본 설정)')
-  })
-
-  test('명령의 model과 effort만 쓰면 "(기본 설정)"을 붙이지 않는다', () => {
-    const job = { kind: 'task' } as Parameters<typeof resolveRun>[0]
-    const used = resolveRun(job, { model: 'gpt-5.5', effort: 'high' }, undefined, { model: 'gpt-6.1-sol', effort: 'medium' })
-    expect(used && runLabel(used)).toBe('gpt-5.5 · high')
   })
 })
 

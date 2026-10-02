@@ -261,7 +261,7 @@ export function parseCodexConfig(toml: string): CodexDefaults {
   return defaults
 }
 
-export type ResolvedRun = { model?: string; effort?: string; isModelDefault: boolean; isEffortDefault: boolean }
+export type ResolvedRun = { model?: string; effort?: string }
 
 // 작업 파일 > 요청 명령 > config.toml 순으로 고른다
 export function resolveRun(job: Job, run: Run | undefined, request: Run | undefined, defaults: CodexDefaults): ResolvedRun | undefined {
@@ -270,22 +270,7 @@ export function resolveRun(job: Job, run: Run | undefined, request: Run | undefi
   const model = known.model ?? fallbackModel
   const effort = known.effort ?? defaults.effort
   if (model === undefined && effort === undefined) return undefined
-  return {
-    model,
-    effort,
-    isModelDefault: known.model === undefined && model !== undefined,
-    isEffortDefault: known.effort === undefined && effort !== undefined,
-  }
-}
-
-// config.toml에서 가져온 값만 "(기본 설정)"으로 표시하고, 일부만이면 어느 값인지 밝힌다
-export function runLabel(run: ResolvedRun): string {
-  const values = [run.model, run.effort].filter(Boolean).join(' · ')
-  const fromConfig = [run.isModelDefault ? 'model' : '', run.isEffortDefault ? 'effort' : ''].filter(Boolean)
-  const shown = [run.model, run.effort].filter(Boolean).length
-  if (fromConfig.length === 0) return values
-  if (fromConfig.length === shown) return `${values} (기본 설정)`
-  return `${values} (${fromConfig.join(', ')} 기본 설정)`
+  return { model, effort }
 }
 
 export function countBySeverity(findings: Finding[]): [Severity, number][] {
