@@ -16,6 +16,7 @@ import {
   parseState,
   PHASE_LABEL,
   resolveRun,
+  runLabel,
   SEVERITY_LABEL,
   sortJobs,
   stepOf,
@@ -410,7 +411,7 @@ export const register: Register = on => {
       const canOpen = !isActive(job) && detail !== undefined && (detail.rendered !== undefined || (detail.findings?.length ?? 0) > 0)
       const where = job.workspaceRoot === context.root ? '' : `${baseName(job.workspaceRoot)} · `
       const used = resolveRun(job, requested[job.id], detail?.request, configured)
-      const usedLabel = used === undefined ? undefined : [used.model, used.effort].filter(Boolean).join(' · ')
+      const usedLabel = used === undefined ? undefined : runLabel(used)
 
       return (
         <Box
@@ -457,7 +458,6 @@ export const register: Register = on => {
               {where}
               {formatClock(job.startedAt ?? job.createdAt)} 시작
               {usedLabel ? ` · ${usedLabel}` : ''}
-              {used?.isDefault ? ' (기본 설정)' : ''}
             </Text>
             {canOpen && <Button key={`open-${job.id}`} label={isOpen ? '접기 ▴' : '결과 ▾'} plain onPress={toggleJob(job.id)} />}
           </Box>

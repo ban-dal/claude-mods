@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
-import { parseDetail, parseRunFlags, resolveRun } from './jobs'
+import { parseDetail, parseRunFlags, resolveRun, runLabel } from './jobs'
 
 const NOW = Date.parse('2026-10-02T10:00:00Z')
 const CONFIG = '/home/me/.claude'
@@ -485,7 +485,20 @@ describe('parseRunFlags 인자 묶음', () => {
 describe('resolveRun', () => {
   test('--model만 명시하고 config.toml에 effort가 없으면 "(기본 설정)"으로 보지 않는다', () => {
     const job = { kind: 'review' } as Parameters<typeof resolveRun>[0]
-    expect(resolveRun(job, { model: 'gpt-6-sol' }, undefined, { model: 'gpt-6.1-sol' })).toEqual({ model: 'gpt-6-sol', effort: undefined, isDefault: false })
+    const used = resolveRun(job, { model: 'gpt-6-sol' }, undefined, { model: 'gpt-6.1-sol' })
+    expect(used && runLabel(used)).toBe('gpt-6-sol')
+  })
+
+  test('명령의 model과 config.toml의 effort는 "gpt-6-sol · medium (effort 기본 설정)"으로 표시한다', () => {
+    const job = { kind: 'review' } as Parameters<typeof resolveRun>[0]
+    const used = resolveRun(job, { model: 'gpt-6-sol' }, undefined, { model: 'gpt-6.1-sol', effort: 'medium' })
+    expect(used && runLabel(used)).toBe('gpt-6-sol · medium (effort 기본 설정)')
+  })
+
+  test('명령의 model과 effort만 쓰면 "(기본 설정)"을 붙이지 않는다', () => {
+    const job = { kind: 'task' } as Parameters<typeof resolveRun>[0]
+    const used = resolveRun(job, { model: 'gpt-5.5', effort: 'high' }, undefined, { model: 'gpt-6.1-sol', effort: 'medium' })
+    expect(used && runLabel(used)).toBe('gpt-5.5 · high')
   })
 })
 

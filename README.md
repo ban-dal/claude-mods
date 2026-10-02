@@ -32,7 +32,7 @@ claude plugin install codex-board@claude-mods
 
 - codex-companion이 남기는 상태 파일(`~/.claude/plugins/data/codex-*/state`)을 읽어 단계, 경과 시간, 최근 로그를 갱신
 - 리뷰가 끝나면 판정과 심각도별 지적 수를 표시하고, `결과`로 지적 목록이나 원문을 펼침
-- 작업별 model·effort 표시: 요청 명령의 `--model`·`--effort` → 작업 파일 → `~/.codex/config.toml` 순으로 확인하고, 설정값으로 추정한 경우 `(기본 설정)` 표시
+- 작업별 model·effort 표시: 요청 명령의 `--model`·`--effort` → 작업 파일 → `~/.codex/config.toml` 순으로 확인하고, `config.toml`에서 가져온 값에만 `(기본 설정)` 표시 (일부만이면 `(effort 기본 설정)`처럼 항목 명시)
 - 로그가 30초 넘게 멈추면 마지막 활동 시각을 경고색으로 표시
 - 이 세션에서 Codex 작업이 시작되면 패널을 자동으로 열고, 끝나면 토스트
 - 범위: 이 세션(현재 레포 포함) / 전체
