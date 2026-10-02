@@ -166,6 +166,15 @@ describe('codex-board', () => {
     expect(opened).toContain('codex-board')
   })
 
+  test('같은 레포의 이전 세션에서 시작해 실행 중인 작업으로는 패널을 자동으로 열지 않는다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state(job({ sessionId: 'S0', createdAt: iso(-600_000) })) }
+    const { opened, clock } = setup(on, files)
+    await start($)
+    await clock.advance(10_000)
+
+    expect(opened).toEqual([])
+  })
+
   test('범위가 "이 세션"이면 다른 세션·레포의 작업을 숨기고 "전체"로 바꾸면 표시한다', async ($, on) => {
     setup(on, {
       [`${APP}/state.json`]: state(job({ status: 'completed', phase: 'done' })),

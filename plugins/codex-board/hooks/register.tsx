@@ -130,7 +130,9 @@ async function notify($: EngineInterface, before: Job[], after: Job[], loaded: R
   let hasStarted = false
   for (const job of after.filter(isMine)) {
     const old = previous.get(job.id)
-    if (isActive(job) && (old === undefined || !isActive(old))) hasStarted = true
+    // 이전 세션에서 시작해 아직 도는 작업으로는 패널을 열지 않는다
+    const isStartedHere = job.sessionId === context.sessionId || Date.parse(job.createdAt) >= context.startedAt
+    if (isActive(job) && isStartedHere && (old === undefined || !isActive(old))) hasStarted = true
     // 두 번의 갱신 사이에 시작하고 끝난 작업도 알린다
     const hasFinishedSinceStart = old === undefined && Date.parse(job.completedAt ?? job.updatedAt) >= context.startedAt
     if (!isActive(job) && ((old !== undefined && isActive(old)) || hasFinishedSinceStart)) {
