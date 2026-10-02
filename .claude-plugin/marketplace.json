@@ -1,0 +1,14 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "ban-dal" },
+  "metadata": { "description": "Claude Code mods" },
+  "plugins": [
+    {
+      "name": "usage-meter",
+      "description": "프롬프트 위에 컨텍스트 사용량, 세션(5시간) 한도, 주간(7일) 한도를 표시",
+      "version": "0.1.0",
+      "author": { "name": "ban-dal" },
+      "source": "./plugins/usage-meter"
+    }
+  ]
+}

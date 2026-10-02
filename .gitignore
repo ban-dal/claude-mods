@@ -1,0 +1,4 @@
+# Claude Code 가 mod 를 로드할 때 생성하는 타입 파일
+plugins/*/.claude-plugin/types/
+plugins/*/tsconfig.json
+.DS_Store
