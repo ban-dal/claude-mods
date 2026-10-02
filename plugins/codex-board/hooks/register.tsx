@@ -133,7 +133,9 @@ async function loadDetails($: EngineInterface, list: Job[], current: Record<stri
   for (const job of list) {
     const known = current[job.id]
     const needsLog = isActive(job) || job.id === open
-    if (known !== undefined && known.updatedAt === job.updatedAt && !needsLog) {
+    // 끝난 작업은 결과를 읽을 때까지 다시 시도한다
+    const isSettled = isActive(job) || known?.isResultLoaded === true
+    if (known !== undefined && known.updatedAt === job.updatedAt && !needsLog && isSettled) {
       next[job.id] = known
       continue
     }
@@ -162,7 +164,9 @@ async function notify($: EngineInterface, before: Job[], after: Job[], loaded: R
   for (const job of after.filter(isMine)) {
     const old = previous.get(job.id)
     // 이전 세션에서 시작해 아직 도는 작업으로는 패널을 열지 않는다
-    const isStartedHere = job.sessionId === context.sessionId || Date.parse(job.createdAt) >= context.startedAt
+    // 세션 ID가 없는 작업만 시작 시각으로 판단한다
+    const isStartedHere =
+      job.sessionId !== undefined ? job.sessionId === context.sessionId : Date.parse(job.createdAt) >= context.startedAt
     if (isActive(job) && isStartedHere && (old === undefined || !isActive(old))) hasStarted = true
     // 두 번의 갱신 사이에 시작하고 끝난 작업도 알린다
     const hasFinishedSinceStart = old === undefined && Date.parse(job.completedAt ?? job.updatedAt) >= context.startedAt

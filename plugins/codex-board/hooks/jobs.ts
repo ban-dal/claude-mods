@@ -156,6 +156,7 @@ export function parseDetail(source: string | undefined, log: string | undefined,
     const parsed = (payload.result ?? {}) as Record<string, unknown>
     const codex = (payload.codex ?? {}) as Record<string, unknown>
 
+    detail.isResultLoaded = STATUSES.some(status => status === stored.status && status !== 'queued' && status !== 'running')
     detail.verdict = text(parsed.verdict)
     detail.findings = structuredFindings(parsed.findings)
     if (detail.findings === undefined && payload.review === 'Review') {

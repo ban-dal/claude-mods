@@ -31,6 +31,8 @@ export type JobDetail = {
   updatedAt: string
   logTail: string[]
   lastActivityAt?: string
+  // 끝난 작업의 작업 파일을 끝까지 읽었는지
+  isResultLoaded?: boolean
   verdict?: string
   findings?: Finding[]
   rendered?: string

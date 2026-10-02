@@ -119,6 +119,7 @@ describe('codex-board', () => {
       recommendation: '-',
     })
     const stored = {
+      status: 'completed',
       result: {
         review: 'Adversarial Review',
         result: { verdict: 'needs-attention', summary: '-', findings: [finding('high', '경합 조건', 12), finding('medium', '누락된 검사', 40), finding('medium', '중복', 41)] },
@@ -212,6 +213,33 @@ describe('codex-board', () => {
     expect(await ui.find({ type: 'Text', text: /gpt-6\.1-sol · medium \(기본 설정\)$/ })).toBeTruthy()
   })
 
+  test('같은 레포에서 다른 세션이 새로 시작한 작업으로는 패널을 열거나 토스트를 띄우지 않는다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state() }
+    const { opened, toasts, clock } = setup(on, files)
+    await start($)
+
+    files[`${APP}/state.json`] = state(job({ sessionId: 'S2', createdAt: iso(1_000), startedAt: iso(1_000) }))
+    await clock.advance(10_000)
+    files[`${APP}/state.json`] = state(job({ sessionId: 'S2', createdAt: iso(1_000), status: 'completed', phase: 'done', updatedAt: iso(12_000), completedAt: iso(12_000) }))
+    await clock.advance(10_000)
+
+    expect(opened).toEqual([])
+    expect(toasts).toEqual([])
+  })
+
+  test('끝난 작업의 결과 파일을 처음에 못 읽으면 다음 갱신 때 다시 읽어 판정을 표시한다', async ($, on) => {
+    const files: Files = { [`${APP}/state.json`]: state(job({ id: 'review-4', kind: 'adversarial-review', status: 'completed', phase: 'done' })) }
+    const { clock } = setup(on, files)
+    await start($)
+    const ui = await $.ui.mount({ plugin: 'codex-board', surface: 'terminal', ...PANE })
+    expect(await ui.find({ type: 'Text', text: '승인' })).toBeFalsy()
+
+    files[`${APP}/jobs/review-4.json`] = JSON.stringify({ status: 'completed', result: { result: { verdict: 'approve', summary: '-', findings: [] } } })
+    await clock.advance(10_000)
+
+    expect(await ui.find({ type: 'Text', text: '승인' })).toBeTruthy()
+  })
+
   test('범위가 "이 세션"이면 다른 세션·레포의 작업을 숨기고 "전체"로 바꾸면 표시한다', async ($, on) => {
     setup(on, {
       [`${APP}/state.json`]: state(job({ status: 'completed', phase: 'done' })),
@@ -258,7 +286,7 @@ describe('codex-board', () => {
   })
 
   test('지적 없이 needs-attention으로 끝난 리뷰는 결과 문구와 토스트를 "확인 필요"로 표시한다', async ($, on) => {
-    const stored = { result: { review: 'Adversarial Review', result: { verdict: 'needs-attention', summary: '-', findings: [] } } }
+    const stored = { status: 'completed', result: { review: 'Adversarial Review', result: { verdict: 'needs-attention', summary: '-', findings: [] } } }
     const files: Files = {
       [`${APP}/state.json`]: state(job({ id: 'review-3', kind: 'adversarial-review' })),
       [`${APP}/jobs/review-3.json`]: JSON.stringify(stored),
