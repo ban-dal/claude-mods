@@ -1,6 +1,6 @@
 {
   "name": "usage-meter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "프롬프트 위에 컨텍스트 사용량, 프롬프트 캐시, 세션(5시간) 한도, 주간(7일) 한도, 세션 비용을 표시",
   "author": { "name": "ban-dal" },
   "types": "./types/index.d.ts"
