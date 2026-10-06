@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register, RenderSurface, SessionContextUsage, SessionRateLimit } from 'claude-code'
+import type { ElementTable, EngineInterface, ModelUsage, Register, RenderSurface, SessionContextUsage, SessionRateLimit } from 'claude-code'
 
-import type { Breakdown, Meter, Slice, Snapshot } from '../types'
-import { barSvg, formatClock, formatRemaining, formatTokens, PALETTE, spacerSvg, textBar, toneOf } from './format'
-import type { Tone } from './format'
+import type { Breakdown, CacheTokens, Meter, Slice, Snapshot } from '../types'
+import { ACCENT, barSvg, CHIP_HEIGHT, chipSvg, formatClock, formatRemaining, formatTokens, ICON_GLYPH, PALETTE, spacerSvg, textBar, toneOf } from './format'
+import type { ChipPart, Tone } from './format'
 import { describeForecast, describeRate, isHistory, projectionOf, recordSamples, sparkline, trendSvg } from './trend'
 import type { Projection } from './trend'
 
@@ -14,6 +14,7 @@ const isDark = atom({ plugin: 'usage-meter', key: 'isDark' } as const, true)
 const isHidden = atom({ plugin: 'usage-meter', key: 'isHidden' } as const, false)
 const openPanel = atom({ plugin: 'usage-meter', key: 'openPanel' } as const, null)
 const alerted = atom({ plugin: 'usage-meter', key: 'alerted' } as const, [])
+const cache = atom({ plugin: 'usage-meter', key: 'cache' } as const, { last: null, total: { input: 0, read: 0, write: 0 } })
 
 const COMMAND = 'usage-meter'
 const HOUR = 3_600_000
@@ -23,6 +24,13 @@ const WINDOWS: Record<string, { label: string; short: string; windowMs: number }
   seven_day: { label: '주간', short: '7d', windowMs: 7 * 24 * HOUR },
 }
 const ORDER = ['context', 'five_hour', 'seven_day']
+const TAB_LABEL: Record<string, string> = { context: '컨텍스트', cache: '캐시', five_hour: '세션', seven_day: '주간' }
+// 칩 배경: 항목색을 이 불투명도로 깐다
+const CHIP_TINT = { dark: 0.16, light: 0.12 }
+// 프롬프트 캐시 TTL (설정값 1h 고정)
+const CACHE_TTL = HOUR
+// 만료가 이만큼 남으면 경고색으로 표시한다
+const CACHE_WARN_MS = 5 * 60_000
 
 const SLICE_LABEL: Record<string, string> = {
   'System prompt': '시스템 프롬프트',
@@ -44,7 +52,7 @@ const PANEL_GAP = 8
 // 구간이 이만큼 지나기 전에는 소진 예상을 띄우지 않는다
 const FORECAST_MIN_ELAPSED = 0.1
 
-function toSnapshot(context: SessionContextUsage, limits: SessionRateLimit[]): Snapshot {
+function toSnapshot(context: SessionContextUsage, limits: SessionRateLimit[], costUsd: number | undefined): Snapshot {
   const meters: Meter[] = [
     { id: 'context', label: '컨텍스트', percent: context.percent, tokens: context.tokens, capacity: context.window },
     ...limits.map(limit => ({
@@ -56,7 +64,16 @@ function toSnapshot(context: SessionContextUsage, limits: SessionRateLimit[]): S
     })),
   ]
   const rank = (id: string) => (ORDER.includes(id) ? ORDER.indexOf(id) : ORDER.length)
-  return { meters: meters.sort((a, b) => rank(a.id) - rank(b.id)) }
+  return { meters: meters.sort((a, b) => rank(a.id) - rank(b.id)), costUsd }
+}
+
+function toCacheTokens(usage: ModelUsage): CacheTokens {
+  return { input: usage.input_tokens, read: usage.cache_read_input_tokens, write: usage.cache_creation_input_tokens }
+}
+
+function hitRateOf(tokens: CacheTokens): number | undefined {
+  const sum = tokens.input + tokens.read + tokens.write
+  return sum === 0 ? undefined : (tokens.read / sum) * 100
 }
 
 function toBreakdown(context: SessionContextUsage): Breakdown | null {
@@ -102,6 +119,12 @@ async function refreshTheme($: EngineInterface) {
   if (typeof theme === 'string') await update($, isDark, () => !theme.startsWith('light'))
 }
 
+async function refreshDetail($: EngineInterface, context: SessionContextUsage) {
+  await update($, breakdown, () => toBreakdown(context))
+  const apiUsage = context.breakdown?.apiUsage
+  if (apiUsage !== undefined) await update($, cache, current => ({ ...current, last: apiUsage === null ? null : toCacheTokens(apiUsage) }))
+}
+
 async function recordHistory($: EngineInterface, limits: SessionRateLimit[]) {
   if (limits.length === 0) return
   const now = await $.clock.now()
@@ -118,11 +141,11 @@ export const register: Register = on => {
     await refreshTheme($)
 
     const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => $.session.usage())
-    await update($, snapshot, () => toSnapshot(usage.context, usage.rateLimits))
-    await update($, breakdown, () => toBreakdown(usage.context))
+    await update($, snapshot, () => toSnapshot(usage.context, usage.rateLimits, usage.cost?.usd))
+    await refreshDetail($, usage.context)
     await recordHistory($, usage.rateLimits)
 
-    // 리셋까지 남은 시간과 소진 예상 표시를 갱신한다
+    // 리셋까지 남은 시간, 소진 예상, 캐시 만료 표시를 갱신한다
     $.clock.every(30_000, () => $.ui.invalidate('ui.render'))
     return next(e)
   })
@@ -139,11 +162,26 @@ export const register: Register = on => {
     return { text: hidden ? '사용량 미터를 숨겼습니다. 다시 보려면 /usage-meter' : '사용량 미터를 표시합니다.' }
   })
 
+  on('turn.complete', async ($, e, next) => {
+    const result = await next(e)
+    const usage = e.usage
+    if (usage === undefined) return result
+    const now = await $.clock.now()
+    const tokens = toCacheTokens(usage)
+    await update($, cache, current => ({
+      ...current,
+      total: { input: current.total.input + tokens.input, read: current.total.read + tokens.read, write: current.total.write + tokens.write },
+      // 서브에이전트 응답은 메인 스레드 캐시를 갱신하지 않는다
+      respondedAt: e.agentId === undefined ? now : current.respondedAt,
+    }))
+    return result
+  })
+
   on('session.measure', async ($, e, next) => {
-    await update($, snapshot, () => toSnapshot(e.context, e.rateLimits))
+    await update($, snapshot, () => toSnapshot(e.context, e.rateLimits, e.cost?.usd))
     if (e.changed.includes('context')) {
       const detailed = await $.session.usage({ breakdown: 'summary' }).catch(() => null)
-      if (detailed) await update($, breakdown, () => toBreakdown(detailed.context))
+      if (detailed) await refreshDetail($, detailed.context)
     }
     if (e.changed.includes('rateLimits')) await recordHistory($, e.rateLimits)
 
@@ -182,28 +220,35 @@ export const register: Register = on => {
     const table: ElementTable<RenderSurface> = $.ui.resolve(e)
     const { Box, Text, Button } = table
     const Svg = e.surface !== 'terminal' && 'Svg' in table ? table.Svg : undefined
-    const palette = PALETTE[(await read($, isDark)) ? 'dark' : 'light']
+    const theme = (await read($, isDark)) ? 'dark' : 'light'
+    const palette = PALETTE[theme]
+    const accent = ACCENT[theme]
     const slices = await read($, breakdown)
     const records = await read($, history)
     const opened = await read($, openPanel)
+    const cached = await read($, cache)
     const now = await $.clock.now()
-    const isShort = Svg === undefined
     const isNarrow = e.props.bodyColumns < 90
 
-    const toggle = (id: string) => () => update($, openPanel, value => (value === id ? null : id))
     const close = () => update($, openPanel, () => null)
 
     const readings = current.meters.map(meter => ({ meter, reading: readingOf(meter, now) }))
     const canOpen = (meter: Meter, reading: Reading) =>
       meter.id === 'context' ? slices !== null && meter.capacity !== undefined && meter.tokens !== undefined : reading.projection !== undefined
+    // 컨텍스트, 캐시, 한도 순으로 열 수 있는 패널
+    const tabs = [
+      ...readings.filter(({ meter, reading }) => meter.id === 'context' && canOpen(meter, reading)).map(({ meter }) => meter.id),
+      ...(cached.last === null ? [] : ['cache']),
+      ...readings.filter(({ meter, reading }) => meter.id !== 'context' && canOpen(meter, reading)).map(({ meter }) => meter.id),
+    ]
 
-    const bar = (key: string, percent: number | undefined, tone: Tone, width: number, cells: number) => {
+    const bar = (key: string, percent: number | undefined, color: string, width: number, cells: number) => {
       if (percent === undefined) return null
       if (Svg) {
-        return <Svg key={key} source={barSvg(percent, width, palette[tone], palette.track)} alt={`${Math.round(percent)}%`} width={width} height={6} />
+        return <Svg key={key} source={barSvg(percent, width, color, palette.track)} alt={`${Math.round(percent)}%`} width={width} height={6} />
       }
       return (
-        <Text key={key} color={palette[tone]}>
+        <Text key={key} color={color}>
           {textBar(percent, cells)}
         </Text>
       )
@@ -220,13 +265,24 @@ export const register: Register = on => {
         paddingX={1}
       >
         <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <Box flexDirection="row" alignItems="center" columnGap={1}>
+            {tabs.map(id => (
+              <Button
+                key={`tab-${id}`}
+                label={TAB_LABEL[id] ?? id}
+                plain
+                dimColor={opened !== id ? true : undefined}
+                onPress={() => update($, openPanel, () => id)}
+              />
+            ))}
+          </Box>
+          <Button key="panel-close" label="✕" plain role="dismiss" onPress={close} />
+        </Box>
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
           <Text bold color={palette.value}>
             {title}
           </Text>
-          <Box flexDirection="row" alignItems="center" columnGap={1}>
-            <Text color={palette.label}>{summary}</Text>
-            <Button key="panel-close" label="✕" plain role="dismiss" onPress={close} />
-          </Box>
+          <Text color={palette.label}>{summary}</Text>
         </Box>
         {body}
       </Box>
@@ -251,7 +307,7 @@ export const register: Register = on => {
                   {slice.name}
                 </Text>
               </Box>
-              <Box flexGrow={1}>{bar(`bar-${slice.name}`, (slice.tokens / capacity) * 100, 'ok', 120, 12)}</Box>
+              <Box flexGrow={1}>{bar(`bar-${slice.name}`, (slice.tokens / capacity) * 100, palette.ok, 120, 12)}</Box>
               <Box width={5} justifyContent="flex-end">
                 <Text color={palette.label}>{formatTokens(slice.tokens)}</Text>
               </Box>
@@ -300,49 +356,161 @@ export const register: Register = on => {
       )
     }
 
-    const items = readings.map(({ meter, reading }, index) => {
-      const label = isShort ? (meter.id === 'context' ? 'ctx' : (WINDOWS[meter.id]?.short ?? meter.label)) : meter.label
+    const cacheExpiresAt = cached.respondedAt === undefined ? undefined : cached.respondedAt + CACHE_TTL
+    const cacheRemainingMs = cacheExpiresAt === undefined ? undefined : cacheExpiresAt - now
+    const isCacheExpiring = cacheRemainingMs !== undefined && cacheRemainingMs > 0 && cacheRemainingMs < CACHE_WARN_MS
+
+    const cachePanel = () => {
+      const last = cached.last
+      if (last === null) return null
+      const sum = last.input + last.read + last.write
+      const rows = [
+        { name: '캐시 읽기', tokens: last.read, color: accent.cache ?? palette.ok },
+        { name: '캐시 쓰기', tokens: last.write, color: palette.warn },
+        { name: '미캐시 입력', tokens: last.input, color: palette.idle },
+      ]
+      const totalRate = hitRateOf(cached.total)
+      const hitRate = hitRateOf(last)
+
+      return frame(
+        '프롬프트 캐시',
+        hitRate === undefined ? '' : `적중 ${Math.round(hitRate)}%`,
+        <Box flexDirection="column">
+          <Text color={palette.label}>직전 응답 입력 {formatTokens(sum)}</Text>
+          {rows.map(row => (
+            <Box key={row.name} flexDirection="row" alignItems="center" columnGap={1}>
+              <Text color={row.color}>■</Text>
+              <Box width={NAME_WIDTH}>
+                <Text color={palette.value}>{row.name}</Text>
+              </Box>
+              <Box flexGrow={1}>{bar(`bar-${row.name}`, sum === 0 ? 0 : (row.tokens / sum) * 100, row.color, 120, 12)}</Box>
+              <Box width={5} justifyContent="flex-end">
+                <Text color={palette.label}>{formatTokens(row.tokens)}</Text>
+              </Box>
+            </Box>
+          ))}
+          {totalRate !== undefined && (
+            <Text color={palette.label}>
+              세션 누적 읽기 {formatTokens(cached.total.read)} · 쓰기 {formatTokens(cached.total.write)} · 적중 {Math.round(totalRate)}%
+            </Text>
+          )}
+          <Text color={isCacheExpiring ? palette.warn : palette.label}>
+            {cacheExpiresAt === undefined || cacheRemainingMs === undefined
+              ? 'TTL 1시간'
+              : cacheRemainingMs <= 0
+                ? '만료됨 · 다음 요청에서 다시 캐시'
+                : `만료 ${formatClock(cacheExpiresAt)} (${formatRemaining(cacheRemainingMs, false)} 후) · TTL 1시간`}
+          </Text>
+        </Box>,
+      )
+    }
+
+    // 막대는 항목 고유색, 경고·위험이면 그 색. 숫자는 기본 글자색, 경고·위험이면 그 색
+    const barColor = (id: string, tone: Tone) => (tone === 'ok' ? (accent[id] ?? palette.ok) : palette[tone])
+    const valueColor = (tone: Tone) => (tone === 'ok' ? palette.value : palette[tone])
+    const iconPart = (id: string): ChipPart => ({ kind: 'icon', id, color: accent[id] ?? palette.label })
+    const textPart = (text: string, color: string, isBold?: boolean): ChipPart => ({ kind: 'text', text, color, isBold })
+
+    type Item = { id: string; alt: string; parts: ChipPart[] }
+
+    const meterItem = ({ meter, reading }: { meter: Meter; reading: Reading }): Item => {
       const value = reading.percent === undefined ? '—' : `${Math.round(reading.percent)}%`
-      const action = meter.id === 'context' ? '구성' : '추이'
-      const isOpen = opened === meter.id
+      const short = WINDOWS[meter.id]?.short
+      // 경과 비율 마커: 막대가 이걸 앞서면 시간보다 빨리 쓰는 중
+      const marker =
+        meter.windowMs === undefined || reading.remainingMs === undefined ? undefined : 1 - reading.remainingMs / meter.windowMs
 
       let detail: { text: string; color: string } | undefined
       if (reading.exhaustsAt !== undefined) {
-        detail = { text: `${formatClock(reading.exhaustsAt)}경 소진`, color: palette.warn }
+        detail = { text: `${formatClock(reading.exhaustsAt)} 소진`, color: palette.warn }
       } else if (reading.remainingMs !== undefined) {
-        detail = { text: formatRemaining(reading.remainingMs, isShort), color: palette.label }
+        detail = { text: formatRemaining(reading.remainingMs, true), color: palette.label }
       }
 
-      return (
-        <Box key={meter.id} flexDirection="row" alignItems="center" columnGap={1}>
-          {index > 0 && <Text color={palette.border}>│</Text>}
-          <Text color={palette.label}>{label}</Text>
-          {!isNarrow && bar(`bar-${meter.id}`, reading.percent, reading.tone, 44, 6)}
-          <Text bold color={palette[reading.tone]}>
-            {value}
-          </Text>
-          {detail && <Text color={detail.color}>· {detail.text}</Text>}
-          {canOpen(meter, reading) && (
-            <Button key={`open-${meter.id}`} label={`${action} ${isOpen ? '▾' : '▴'}`} plain onPress={toggle(meter.id)} />
-          )}
-        </Box>
-      )
+      const parts: ChipPart[] = [iconPart(meter.id)]
+      if (short) parts.push(textPart(short, palette.label))
+      if (!isNarrow && reading.percent !== undefined) parts.push({ kind: 'bar', percent: reading.percent, color: barColor(meter.id, reading.tone), marker })
+      parts.push(textPart(value, valueColor(reading.tone), true))
+      if (detail) parts.push({ kind: 'divider' }, iconPart('history'), textPart(detail.text, detail.color))
+      return { id: meter.id, alt: [meter.label, value, detail?.text].filter(Boolean).join(' '), parts }
+    }
+
+    const cacheItem = (): Item | null => {
+      if (cached.last === null && cached.respondedAt === undefined) return null
+      const hitRate = cached.last === null ? undefined : hitRateOf(cached.last)
+      const value = hitRate === undefined ? '—' : `${Math.round(hitRate)}%`
+      const expiry = cacheRemainingMs === undefined ? undefined : cacheRemainingMs <= 0 ? '만료' : formatRemaining(cacheRemainingMs, true)
+      const parts: ChipPart[] = [iconPart('cache'), textPart(value, valueColor(hitRate === undefined ? 'idle' : 'ok'), true)]
+      if (expiry) parts.push({ kind: 'divider' }, iconPart('hourglass'), textPart(expiry, isCacheExpiring ? palette.warn : palette.label))
+      return { id: 'cache', alt: ['캐시 적중', value, expiry].filter(Boolean).join(' '), parts }
+    }
+
+    const costItem = (): Item | null => {
+      if (current.costUsd === undefined) return null
+      const value = `$${current.costUsd.toFixed(2)}`
+      return { id: 'cost', alt: `비용 ${value}`, parts: [iconPart('cost'), textPart(value, palette.value, true)] }
+    }
+
+    const chipStyle = (id: string) => ({
+      tint: accent[id] ?? palette.idle,
+      tintOpacity: CHIP_TINT[theme],
+      divider: palette.border,
+      ink: palette.value,
     })
+
+    // terminal: 칩 배경 없이 글자로. 글자가 없는 아이콘(history, hourglass)은 구분점으로 대신한다
+    const textParts = (parts: ChipPart[]) =>
+      parts.flatMap((part, index) => {
+        const key = `part-${index}`
+        if (part.kind === 'icon') {
+          const glyph = ICON_GLYPH[part.id]
+          return glyph === undefined ? [] : [<Text key={key} color={part.color}>{glyph}</Text>]
+        }
+        if (part.kind === 'text') {
+          return [<Text key={key} bold={part.isBold ? true : undefined} color={part.color}>{part.text}</Text>]
+        }
+        if (part.kind === 'bar') return [<Text key={key} color={part.color}>{textBar(part.percent, 6)}</Text>]
+        return [<Text key={key} color={palette.border}>·</Text>]
+      })
+
+    // 컨텍스트는 항상 첫 미터: 캐시를 그 옆에 둔다
+    const [contextItem, ...limitItems] = readings.map(meterItem)
+    const items = [contextItem, cacheItem(), ...limitItems, costItem()]
+      .filter(item => item !== null && item !== undefined)
+      .map((item, index) => {
+        if (Svg) {
+          const chip = chipSvg(item.parts, chipStyle(item.id))
+          return <Svg key={item.id} source={chip.source} alt={item.alt} width={chip.width} height={CHIP_HEIGHT} />
+        }
+        return (
+          <Box key={item.id} flexDirection="row" alignItems="center" columnGap={1}>
+            {index > 0 && <Text color={palette.border}>│</Text>}
+            {textParts(item.parts)}
+          </Box>
+        )
+      })
+
+    const toggleDetails = () => update($, openPanel, value => (value === null ? (tabs[0] ?? null) : null))
 
     const openReading = readings.find(({ meter }) => meter.id === opened)
     const panel =
-      openReading === undefined
-        ? null
-        : openReading.meter.id === 'context'
-          ? contextPanel(openReading.meter)
-          : trendPanel(openReading.meter, openReading.reading)
+      opened === 'cache'
+        ? cachePanel()
+        : openReading === undefined
+          ? null
+          : openReading.meter.id === 'context'
+            ? contextPanel(openReading.meter)
+            : trendPanel(openReading.meter, openReading.reading)
 
     return (
       <Box flexDirection="column">
         {panel}
         {panel && Svg && <Svg key="panel-gap" source={spacerSvg(PANEL_WIDTH, PANEL_GAP)} alt="패널 간격" width={PANEL_WIDTH} height={PANEL_GAP} />}
-        <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1}>
-          {items}
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={1} flexGrow={1} flexShrink={1}>
+            {items}
+          </Box>
+          {tabs.length > 0 && <Button key="details" label="상세" onPress={toggleDetails} />}
         </Box>
       </Box>
     )

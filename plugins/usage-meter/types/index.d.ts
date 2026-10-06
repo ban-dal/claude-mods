@@ -10,7 +10,7 @@ export type Meter = {
   capacity?: number
 }
 
-export type Snapshot = { meters: Meter[] }
+export type Snapshot = { meters: Meter[]; costUsd?: number }
 
 // /context 의 한 줄: color 는 Claude Code 테마 키
 export type Slice = { name: string; tokens: number; color: string }
@@ -25,6 +25,17 @@ export type WindowHistory = { resetsAt: string; points: Sample[] }
 // 한도 종류(five_hour, seven_day)별 현재 구간의 기록
 export type History = Record<string, WindowHistory>
 
+export type CacheTokens = { input: number; read: number; write: number }
+
+export type CacheState = {
+  // 메인 스레드 직전 응답의 토큰
+  last: CacheTokens | null
+  // 서브에이전트를 포함한 세션 누적
+  total: CacheTokens
+  // 메인 스레드 턴이 마지막으로 끝난 시각(ms)
+  respondedAt?: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-meter': {
@@ -36,6 +47,7 @@ declare module 'claude-code' {
       // 열린 패널의 미터 id (context, five_hour, seven_day)
       openPanel: string | null
       alerted: string[]
+      cache: CacheState
     }
   }
 }
